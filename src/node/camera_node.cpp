@@ -87,6 +87,9 @@ int CameraNode::onStart() {
     running_.store(true, std::memory_order_release);
     capture_thread_ = std::thread(&CameraNode::captureLoop, this);
 
+    // Notify Node-RED that camera is active
+    event("enabled", MA_OK, {{"value", true}});
+
     return MA_OK;
 }
 
@@ -153,6 +156,12 @@ int CameraNode::onControl(const std::string& action, const nlohmann::json& data)
         bool enabled = data.value("value", true);
         inference_enabled_.store(enabled, std::memory_order_release);
         event("enabled", MA_OK, {{"value", enabled}});
+        return MA_OK;
+    }
+
+    // Silently accept unsupported camera controls (light, pause, etc.)
+    // Return MA_OK so Node-RED does not show an error status
+    if (action == "light" || action == "pause") {
         return MA_OK;
     }
 
