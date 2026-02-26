@@ -712,17 +712,64 @@ void ModelNode::inferLoop() {
 
             if (websocket_ && ws_) {
                 try {
-                    nlohmann::json ws_msg = {
-                        {"type", static_cast<int>(MessageType::EVENT)},
-                        {"name", "invoke"},
-                        {"code", MA_OK},
-                        {"data", event_data}
-                    };
+                    // Build preview-compatible format:
+                    // {"data": {"boxes":[[x,y,w,h,score,class_id],...], "labels":[...], "resolution":[w,h], "image":"..."}}
+                    nlohmann::json preview_data = nlohmann::json::object();
 
-                    if (!output_ && ws_msg["data"].is_object()) {
-                        ws_msg["data"]["image"] = "";
+                    // Transform boxes: object array → array-of-arrays
+                    if (event_data.contains("boxes") && event_data["boxes"].is_array()) {
+                        nlohmann::json boxes_arr = nlohmann::json::array();
+                        nlohmann::json labels_arr = nlohmann::json::array();
+                        for (const auto& box : event_data["boxes"]) {
+                            if (box.is_object()) {
+                                double x = box.value("x", 0.0);
+                                double y = box.value("y", 0.0);
+                                double w = box.value("w", 0.0);
+                                double h = box.value("h", 0.0);
+                                double score = box.value("score", 0.0);
+                                int cls = box.value("class_id", 0);
+                                boxes_arr.push_back({x, y, w, h, score, cls});
+                                labels_arr.push_back(box.value("label", ""));
+                            }
+                        }
+                        preview_data["boxes"] = std::move(boxes_arr);
+                        preview_data["labels"] = std::move(labels_arr);
                     }
 
+                    // resolution field
+                    int fw = event_data.value("frame_width", 0);
+                    int fh = event_data.value("frame_height", 0);
+                    preview_data["resolution"] = {fw, fh};
+
+                    // base64 JPEG image when output_ (debug) is enabled
+                    if (output_) {
+                        try {
+                            cv::Mat mat = ctx->frame->frame().to_mat_copy();
+                            if (!mat.empty()) {
+                                std::vector<uchar> jpeg_buf;
+                                std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 80};
+                                if (cv::imencode(".jpg", mat, jpeg_buf, params)) {
+                                    // base64 encode using standard alphabet
+                                    static const char* b64 =
+                                        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                                    std::string encoded;
+                                    encoded.reserve(((jpeg_buf.size() + 2) / 3) * 4);
+                                    for (size_t i = 0; i < jpeg_buf.size(); i += 3) {
+                                        uint32_t v = (uint32_t)jpeg_buf[i] << 16;
+                                        if (i + 1 < jpeg_buf.size()) v |= (uint32_t)jpeg_buf[i+1] << 8;
+                                        if (i + 2 < jpeg_buf.size()) v |= jpeg_buf[i+2];
+                                        encoded += b64[(v >> 18) & 0x3f];
+                                        encoded += b64[(v >> 12) & 0x3f];
+                                        encoded += (i + 1 < jpeg_buf.size()) ? b64[(v >> 6) & 0x3f] : '=';
+                                        encoded += (i + 2 < jpeg_buf.size()) ? b64[v & 0x3f] : '=';
+                                    }
+                                    preview_data["image"] = std::move(encoded);
+                                }
+                            }
+                        } catch (...) {}
+                    }
+
+                    nlohmann::json ws_msg = {{"data", std::move(preview_data)}};
                     std::string payload = ws_msg.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
                     if (ws_->broadcast_text(payload.c_str(), payload.size())) {
                         ws_event_count_.fetch_add(1, std::memory_order_relaxed);
