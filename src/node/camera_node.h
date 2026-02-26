@@ -103,6 +103,9 @@ private:
     mutable std::mutex timing_mutex_;
     static constexpr auto kTimingStaleThreshold = std::chrono::seconds(5);
 
+    // Enable/disable inference distribution (controlled by "enabled" action)
+    std::atomic<bool> inference_enabled_{true};
+
     // Statistics
     std::atomic<uint64_t> frame_count_{0};
     std::atomic<uint64_t> skip_count_{0};

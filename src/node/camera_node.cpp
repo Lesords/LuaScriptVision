@@ -149,6 +149,13 @@ int CameraNode::onControl(const std::string& action, const nlohmann::json& data)
         return MA_OK;
     }
 
+    if (action == "enabled") {
+        bool enabled = data.value("value", true);
+        inference_enabled_.store(enabled, std::memory_order_release);
+        event("enabled", MA_OK, {{"value", enabled}});
+        return MA_OK;
+    }
+
     return MA_EINVAL;
 }
 
@@ -249,7 +256,7 @@ bool CameraNode::processFrame(lua_cv::Frame& frame) {
     sf->set_frame_id(frame_id);
 
     // Distribute to inference channel subscribers
-    if (config_.enable_inference) {
+    if (config_.enable_inference && inference_enabled_.load(std::memory_order_acquire)) {
         distributeFrame(sf, frame_id, FrameChannel::INFER);
     }
 
