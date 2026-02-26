@@ -25,6 +25,21 @@ make
 # Rebuild after changes
 cd build && make -j8
 
+# SG200X Device: Parallel inference + streaming (with camera)
+# Build for SG200X:
+cmake -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-sg200x.cmake -DENABLE_CVI_CAMERA=ON -B build
+make -j8 parallel_infer_stream
+#
+# Run on device:
+./build/parallel_infer_stream scripts/yolo11_tensor_detector.lua /path/to/model.cvimodel --duration 300
+#
+# Command format:
+#   parallel_infer_stream <script.lua> <model.cvimodel> [--duration <seconds>]
+#
+# Example on-device deployment:
+#   /userdata/parallel_infer_stream /userdata/scripts/yolo11_tensor_detector.lua \
+#                                    /userdata/Models/model.cvimodel --duration 300
+
 # JPEG Decode Method Selection
 # Default: Software decode (OpenCV, no VB pool dependency)
 cmake -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-sg200x.cmake -B build
@@ -314,6 +329,121 @@ other:                        0.14 ms
 
 ---
 
+### 🔄 Automated Testing Workflow for Device Deployment
+
+**CRITICAL**: After making code changes to fix issues, follow this automated workflow:
+
+**When to apply**: After ANY code change that affects runtime behavior (bug fixes, new features, refactoring)
+
+**Workflow Steps**:
+
+1. **Build the project**:
+   ```bash
+   cd build && make -j8
+   ```
+
+2. **Deploy to device** using base64 transfer (NOT `/remote-device deploy` — see ⚠️ below):
+   ```bash
+   base64 build/node_server | ssh -J lese@127.0.0.1:2222 root@192.168.42.1 'base64 -d > /userdata/node_server && chmod +x /userdata/node_server'
+   ```
+   Or via physical host:
+   ```bash
+   base64 build/node_server | sshpass -p '12345678' ssh lese@127.0.0.1 -p 2222 \
+     "sshpass -p 'root' ssh root@192.168.42.1 'base64 -d > /userdata/node_server && chmod +x /userdata/node_server'"
+   ```
+   **⚠️ CRITICAL**: The `/remote-device deploy` skill script uses `$(cat binary_file)` which **strips null bytes** from ELF binaries, producing a corrupted binary with wrong `e_type`. Always use the base64 pipeline method above.
+
+3. **Stop old process** (if running):
+   ```bash
+   /remote-device stop node_server
+   ```
+
+4. **⚠️ Stop Node-RED flows before testing** (execute on device):
+   ```bash
+   /remote-device cmd "curl -H 'Content-Type: application/json' http://localhost:1880/flows/state -d '{\"state\": \"stop\"}'"
+   ```
+   **Why**: Prevents Node-RED from interfering with node_server during testing
+
+5. **Run and test** on device:
+   ```bash
+   /remote-device run "cd /userdata && ./node_server --host localhost --port 1883 --client-id recamera"
+   ```
+   Or for background testing:
+   ```bash
+   /remote-device cmd "cd /userdata && nohup ./node_server --host localhost --port 1883 --client-id recamera > /tmp/node_server.log 2>&1 &"
+   ```
+
+   **Command parameters**:
+   - `--host localhost` - MQTT broker address
+   - `--port 1883` - MQTT broker port
+   - `--client-id recamera` - MQTT client identifier
+
+6. **Start Node-RED flows** (to trigger camera/model initialization):
+   ```bash
+   /remote-device cmd "curl -H 'Content-Type: application/json' http://localhost:1880/flows/state -d '{\"state\": \"start\"}'"
+   ```
+   **Why**: Triggers Node-RED to create camera/model nodes and initialize hardware
+
+7. **⚠️ Analyze logs** (after 5-10 seconds for initialization):
+   ```bash
+   /remote-device cmd "tail -100 /tmp/node_server.log"
+   ```
+   **Look for**:
+   - `[CviCamera] VI device timing enabled: fps=30` - VI timing OK
+   - `[INFO] CviCamera: warmup dropped X/3 frames` - Frame capture OK
+   - `CviVpssProcessor - CVI_VPSS_GetChnFrame failed: 0xc006800e` - VPSS error
+   - `[ERROR]` lines - Any initialization failures
+
+8. **⚠️ Restart Node-RED flows after testing** (when done):
+   ```bash
+   /remote-device cmd "curl -H 'Content-Type: application/json' http://localhost:1880/flows/state -d '{\"state\": \"stop\"}'"
+   ```
+   **Why**: Clean shutdown before stopping node_server
+
+9. **Stop node_server** (when done testing):
+   ```bash
+   /remote-device stop node_server
+   ```
+
+10. **Iterate based on results**:
+   - If test passes → Continue with next task
+   - If test fails → Analyze logs, fix issue, repeat from step 1
+
+**Example session**:
+```
+User: Fix the crash in camera_node
+
+Claude: [Analyzes issue, makes fix]
+       [Builds] cd build && make -j8
+       [Stops Node-RED] /remote-device cmd "curl -H 'Content-Type: application/json' \
+                                         http://localhost:1880/flows/state -d '{\"state\": \"stop\"}'"
+       [Deploys] /remote-device deploy build/node_server
+       [Starts node_server] /remote-device cmd "cd /userdata && nohup ./node_server \
+                         --host localhost --port 1883 --client-id recamera > /tmp/node_server.log 2>&1 &"
+       [Starts Node-RED] /remote-device cmd "curl -H 'Content-Type: application/json' \
+                                         http://localhost:1880/flows/state -d '{\"state\": \"start\"}'"
+       [Waits 5-10 seconds for initialization]
+       [Analyzes logs] /remote-device cmd "tail -100 /tmp/node_server.log"
+       [Reports] Found errors: CviVpssProcessor failed → Need to fix VPSS Group 5
+```
+
+**Node-RED Flow Control Notes**:
+- `state: "stop"` - Pauses all Node-RED flows, stops camera/model/stream nodes
+- `state: "start"` - Resumes all Node-RED flows, creates and starts nodes
+- **Always stop Node-RED before deploying/testing node_server**
+- **Start Node-RED AFTER node_server is running** to trigger camera/model creation
+- **Always restart Node-RED after testing** to restore normal operation
+
+**Quick test commands**:
+```bash
+/remote-device status              # Overall device status
+/remote-device logs 100            # Recent kernel logs
+/remote-device cmd "free -h"        # Memory usage
+/remote-device cmd "ps aux"         # Running processes
+```
+
+---
+
 ### When Adding Tensor Operations
 
 1. **Decide contiguity requirement**:
@@ -441,3 +571,206 @@ Models must be in `models/` directory. The system supports:
 - Multi-output models (returns Lua table of tensors)
 
 Session creation is expensive (~100-200ms), so scripts should reuse sessions for video/batch processing.
+
+## Device Testing and Debugging
+
+### Memory Issues and Device Restart
+
+**⚠️ IMPORTANT**: After multiple test runs, the device may experience memory fragmentation or depletion, resulting in errors like:
+```
+ion ioctl fail:: Out of memory
+Assertion failed: mem_alloc_raw
+```
+
+**When this happens, you MUST manually restart the device:**
+```bash
+# Via remote-device skill
+/rd cmd "reboot"
+
+# Or via SSH directly
+ssh root@192.168.42.1 "reboot"
+```
+
+**Before testing**, always ensure previous processes are stopped:
+```bash
+/rd cmd "killall -9 node_server parallel_stream 2>/dev/null"
+```
+
+**Common causes of memory issues:**
+- Multiple parallel_infer_stream instances running simultaneously
+- VB pool exhaustion (check `cat /proc/cvitek/vb`)
+- VPSS groups not properly cleaned up after crash
+
+### Testing Workflow After Code Changes
+
+**Always follow this sequence after modifying camera/VPSS-related code:**
+
+1. **Stop all running processes:**
+   ```bash
+   /rd cmd "killall -9 node_server parallel_stream 2>/dev/null; sleep 2"
+   ```
+
+2. **Rebuild affected binaries:**
+   ```bash
+   cd build && make -j8 node_server parallel_infer_stream
+   ```
+
+3. **Deploy to device** (use base64, NOT `/rd deploy` which corrupts binaries):
+   ```bash
+   base64 build/node_server | sshpass -p '12345678' ssh lese@127.0.0.1 -p 2222 \
+     "sshpass -p 'root' ssh root@192.168.42.1 'base64 -d > /userdata/node_server && chmod +x /userdata/node_server'"
+   # or for parallel_infer_stream:
+   base64 build/parallel_infer_stream | sshpass -p '12345678' ssh lese@127.0.0.1 -p 2222 \
+     "sshpass -p 'root' ssh root@192.168.42.1 'base64 -d > /userdata/parallel_infer_stream && chmod +x /userdata/parallel_infer_stream'"
+   ```
+
+4. **Restart device if previous run had memory issues:**
+   ```bash
+   /rd cmd "reboot"
+   # Wait ~30 seconds for device to boot
+   sleep 30
+   ```
+
+5. **Verify basic functionality first:**
+   ```bash
+   # CRITICAL: Always verify parallel_infer_stream works before testing other components
+   /rd cmd "cd /userdata && timeout 15 ./parallel_infer_stream /userdata/scripts/yolo11_tensor_detector.lua /usr/share/supervisor/models/yolo11n_detection_cv181x_int8.cvimodel --duration 10"
+   ```
+
+   **Expected results:**
+   - `[INFO] CviCamera: warmup dropped 1/3 frames` or similar (NOT `captured 0/3`)
+   - `rtsp://192.168.42.1:554/live` RTSP server started
+   - `NMS final boxes: 0` (or other number, indicating inference is running)
+
+   **If parallel_infer_stream fails:**
+   - Do NOT proceed with node_server testing
+   - Revert recent changes and investigate
+   - Common issues: VPSS not enabled, sensor not detected, VI/VPSS binding failure
+
+6. **Test other components:**
+   ```bash
+   # Only after parallel_infer_stream works, test node_server
+   # (deploy via base64, not /rd deploy)
+   /rd stop node_server
+   /rd run "cd /userdata && ./node_server --host localhost --port 1883 --client-id recamera"
+   ```
+
+### ⚠️ Development Best Practice
+
+**Before adding new features, always verify baseline functionality:**
+
+1. **First test with `parallel_infer_stream`** - This is the minimal, reference implementation
+2. **If baseline fails** - Fix camera/VPSS issues first
+3. **Then test with `node_server`** - Adds MQTT/node management on top
+4. **Finally test with Node-RED** - Full integration test
+
+**Why this order matters:**
+- `parallel_infer_stream` tests pure camera/VPSS/inference pipeline
+- `node_server` adds MQTT complexity
+- Node-RED adds flow management complexity
+- Testing in this order isolates issues faster
+
+### Known Issues
+
+#### VPSS Preprocessing with MEM Input
+
+**Status**: Not Working on this hardware/driver
+
+**Symptoms**:
+- `CVI_VPSS_SendFrame` succeeds (returns 0x0)  
+- `CVI_VPSS_GetChnFrame` fails with `0xc006800e` (buffer empty)
+- Group 5 does not appear in `/proc/cvitek/vpss` despite successful `CVI_VPSS_CreateGrp`
+
+**Root Cause**: The VPSS driver on this hardware does not properly support dynamic MEM input group creation. DRV WORK STATUS DEV0 remains empty even after group creation.
+
+**Workaround**: ModelNode uses CPU/OpenCV preprocessing instead of VPSS for offline frame preprocessing.
+
+#### Sensor Library Linking
+
+**Status**: Fixed ✅
+
+**Problem**: `Sensor object is NULL - library not linked?`
+
+**Solution**: Ensure `libsns_full.a` is wrapped with `--whole-archive` in CMakeLists.txt to preserve weak sensor symbols:
+```cmake
+target_link_libraries(parallel_infer_stream PRIVATE
+    ...
+    -Wl,--whole-archive
+    ${CVI_MPI_LIB_DIR}/libsns_full.a
+    -Wl,--no-whole-archive
+    ...
+)
+```
+
+#### Binary Deployment Corruption via `/remote-device deploy`
+
+**Status**: Known Limitation ⚠️
+
+**Symptoms**:
+- Deployed binary crashes immediately or shows `Exec format error`
+- `xxd /userdata/node_server | head -1` shows wrong ELF magic (`e_type=0x05f1` instead of `0x0002`)
+- `md5sum` of local build vs device binary mismatch
+
+**Root Cause**: The `/remote-device deploy` skill script uses `local file_content=$(cat "$local_file")` in bash, which strips null bytes (`\0`) from binary files. ELF binaries contain null bytes in headers and code, so the resulting file is corrupted.
+
+**Solution**: Always deploy binaries using the base64 pipeline:
+```bash
+base64 build/node_server | sshpass -p '12345678' ssh lese@127.0.0.1 -p 2222 \
+  "sshpass -p 'root' ssh root@192.168.42.1 \
+   'base64 -d > /userdata/node_server && chmod +x /userdata/node_server && echo OK'"
+```
+
+**Verification**:
+```bash
+# Compare md5 before and after deploy
+md5sum build/node_server
+/rd cmd "md5sum /userdata/node_server"
+# Also check ELF header
+/rd cmd "xxd /userdata/node_server | head -2"
+# Correct first line: 7f45 4c46 0201 0100 0000 ... (.ELF)
+# Correct second line: 0200 f300 ... (e_type=2 ET_EXEC, e_machine=0xf3 RISC-V)
+```
+
+#### node_server Camera Node Shows NULL in Node-RED
+
+**Status**: Fixed ✅
+
+**Symptoms**:
+- Node-RED UI shows camera node status as "NULL" or error
+- `[NodeFactory] onCreate failed for detector with code 22` in logs
+- `[WARN] CviCamera: warmup captured 0/3` on first cold boot
+
+**Root Causes & Fixes** (all applied to `src/node/`):
+
+1. **`model_node.cpp`: Wrong LUA_PATH — script `require()` fails**
+   - Lua scripts use `require("scripts.lib.preprocess")` which needs `LUA_PATH` to include the **parent** of the `scripts/` directory
+   - Old code set `LUA_PATH = /userdata/scripts/?.lua` → looked for `/userdata/scripts/scripts/lib/preprocess.lua` (wrong)
+   - Fix: include parent dir — `LUA_PATH = /userdata/?.lua;/userdata/scripts/?.lua`
+
+2. **`node_server.cpp`: Auto-script detection picked incompatible script**
+   - Fallback to `yolo11_detector.lua` (non-tensor) which calls `filter_yolo()` on CVI model output
+   - CVI model output shape is incompatible → `Invalid YOLO output shape` error in postprocess
+   - Fix: prefer `yolo11_tensor_detector.lua` in fallback search order
+
+3. **`stream_node.cpp`: Camera lookup in `onCreate()` fails if model created before camera**
+   - Node-RED may send `create model` before `create camera`; `onCreate()` finds no camera dependency → `MA_EINVAL`
+   - Fix: move camera lookup to `onStart()` (lazy resolution)
+
+4. **`node_factory.cpp`: Factory mutex held during camera `open()` (ISP warmup ~300ms)**
+   - `std::lock_guard` held for entire `create()` including `start()` → blocks all MQTT for 300ms+
+   - Fix: `std::unique_lock` + `lock.unlock()` before calling `start()`
+
+5. **`camera_node.cpp`, `model_node.cpp`: `enabled` action unhandled**
+   - Node-RED sends `enabled {value: true}` after `create`; nodes returned `MA_EINVAL` (not implemented)
+   - Fix: add `enabled` handlers that set `inference_enabled_` / `infer_enabled_` atomics
+
+**Diagnosis tip**: Run `parallel_infer_stream` first (not node_server) to verify camera hardware works:
+```bash
+/rd cmd "cd /userdata && timeout 15 ./parallel_infer_stream \
+  scripts/yolo11_tensor_detector.lua \
+  /usr/share/supervisor/models/yolo11n_detection_cv181x_int8.cvimodel --duration 10"
+```
+Expected: `[INFO] CviCamera: warmup dropped 1/3 frames` + `NMS final boxes: N`
+
+**Note on cold-boot warmup**: On first boot, `warmup captured 0/3` is normal (ISP needs ~1s to stabilize). On second run it shows `warmup dropped 1/3` (success). The `captureLoop` continues retrying so inference starts normally after warmup.
+
