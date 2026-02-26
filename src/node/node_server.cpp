@@ -358,14 +358,16 @@ int NodeServer::handleCreate(const std::string& node_id, const nlohmann::json& d
                 }
             }
 
-            // Default script search paths
+            // Default script search paths (lowercase "scripts" for Linux case-sensitivity)
             std::vector<std::string> search_paths = {
-                "/userdata/Scripts/" + model_name + "_detector.lua",
-                "/userdata/Scripts/" + model_name + ".lua",
+                "/userdata/scripts/" + model_name + "_detector.lua",
+                "/userdata/scripts/" + model_name + ".lua",
+                "/userdata/scripts/yolo11_tensor_detector.lua",  // Prefer tensor version
+                "/userdata/scripts/yolo11_detector.lua",
                 "/usr/local/share/luascriptvision/scripts/" + model_name + "_detector.lua",
                 "./scripts/" + model_name + "_detector.lua",
-                "./scripts/yolo11_tensor_detector.lua",  // Prefer tensor version (CVI-compatible)
-                "./scripts/yolo11_detector.lua"          // Legacy fallback
+                "./scripts/yolo11_tensor_detector.lua",
+                "./scripts/yolo11_detector.lua"
             };
 
             // Find first existing script
@@ -379,7 +381,7 @@ int NodeServer::handleCreate(const std::string& node_id, const nlohmann::json& d
 
             // If no script found, use a default and let ModelNode handle the error
             if (!config.contains("script")) {
-                config["script"] = "/userdata/Scripts/yolo11_detector.lua";
+                config["script"] = "/userdata/scripts/yolo11_tensor_detector.lua";
             }
         }
     }
