@@ -279,11 +279,15 @@ ModelNode::~ModelNode() {
 
 int ModelNode::onCreate(const nlohmann::json& config) {
     // 1. Parse configuration
-    if (!config.contains("model")) {
-        event("error", MA_EINVAL, {{"message", "Missing 'model' field"}});
+    // Support both 'model' (internal) and 'uri' (Node-RED sscma-node) fields
+    if (config.contains("model")) {
+        model_path_ = config.at("model");
+    } else if (config.contains("uri")) {
+        model_path_ = config.at("uri");
+    } else {
+        event("error", MA_EINVAL, {{"message", "Missing 'model' or 'uri' field"}});
         return MA_EINVAL;
     }
-    model_path_ = config.at("model");
 
 #ifdef USE_CVI_TPU
     {
@@ -301,8 +305,11 @@ int ModelNode::onCreate(const nlohmann::json& config) {
     }
     script_path_ = config.at("script");
 
+    // Support both 'threshold' (internal) and 'tscore' (Node-RED sscma-node) fields
     if (config.contains("threshold")) {
         conf_threshold_ = config["threshold"].get<float>();
+    } else if (config.contains("tscore")) {
+        conf_threshold_ = config["tscore"].get<float>();
     }
     if (config.contains("input_mode")) {
         std::string mode = config["input_mode"];
@@ -350,11 +357,22 @@ int ModelNode::onCreate(const nlohmann::json& config) {
     // 2. Set LUA_PATH from script directory if not already set
     const char* existing_lua_path = std::getenv("LUA_PATH");
     if (!existing_lua_path) {
-        // Extract directory from script path and set LUA_PATH
+        // Build LUA_PATH including both the script directory and its parent.
+        // Scripts often use require("scripts.lib.foo") which resolves relative to
+        // the parent of the scripts/ directory, so we must include parent_dir/?.lua.
         size_t last_slash = script_path_.find_last_of("/\\");
         if (last_slash != std::string::npos) {
             std::string script_dir = script_path_.substr(0, last_slash);
-            std::string lua_path = script_dir + "/?.lua;" + script_dir + "/?/init.lua;;";
+            std::string parent_dir;
+            size_t parent_slash = script_dir.find_last_of("/\\");
+            if (parent_slash != std::string::npos) {
+                parent_dir = script_dir.substr(0, parent_slash);
+            }
+            std::string lua_path;
+            if (!parent_dir.empty()) {
+                lua_path = parent_dir + "/?.lua;" + parent_dir + "/?/init.lua;";
+            }
+            lua_path += script_dir + "/?.lua;" + script_dir + "/?/init.lua;;";
             setenv("LUA_PATH", lua_path.c_str(), 1);
         }
     }
@@ -622,6 +640,13 @@ int ModelNode::onControl(const std::string& action, const nlohmann::json& data) 
         return MA_OK;
     }
 
+    if (action == "enabled") {
+        bool enabled = data.value("value", true);
+        infer_enabled_.store(enabled, std::memory_order_release);
+        event("enabled", MA_OK, {{"value", enabled}});
+        return MA_OK;
+    }
+
     return MA_EINVAL;
 }
 
@@ -630,6 +655,12 @@ void ModelNode::inferLoop() {
         PipelineContext* ctx;
         if (!inbox_.fetch(&ctx, 100)) {
             // Timeout or interrupted
+            continue;
+        }
+
+        // When disabled, drain inbox without processing
+        if (!infer_enabled_.load(std::memory_order_acquire)) {
+            delete ctx;
             continue;
         }
 
