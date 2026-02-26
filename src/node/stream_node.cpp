@@ -72,17 +72,8 @@ int StreamNode::onCreate(const nlohmann::json& config) {
         return MA_ENOTSUP;
     }
 
-    // Resolve camera dependency
-    for (const auto& [dep_id, dep] : dependencies_) {
-        if (dep && dep->type() == "camera") {
-            camera_node_ = static_cast<CameraNode*>(dep);
-            break;
-        }
-    }
-    if (!camera_node_) {
-        event("error", MA_EINVAL, {{"message", "StreamNode requires camera dependency"}});
-        return MA_EINVAL;
-    }
+    // Note: camera_node_ is resolved lazily in onStart() so that StreamNode can be
+    // created before CameraNode (Node-RED may send create commands in any order).
 
     return MA_OK;
 }
@@ -90,6 +81,16 @@ int StreamNode::onCreate(const nlohmann::json& config) {
 int StreamNode::onStart() {
     if (running_.load(std::memory_order_acquire)) {
         return MA_OK;
+    }
+
+    // Resolve camera dependency here (lazy, supports any creation order)
+    if (!camera_node_) {
+        for (const auto& [dep_id, dep] : dependencies_) {
+            if (dep && dep->type() == "camera") {
+                camera_node_ = static_cast<CameraNode*>(dep);
+                break;
+            }
+        }
     }
 
     if (!camera_node_ || !camera_node_->isStarted()) {

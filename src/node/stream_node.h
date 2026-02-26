@@ -39,6 +39,8 @@ private:
         int ip_qp_delta = -1;
         int port = 554;
         std::string session = "live";
+        std::string username = "admin";  // Node-RED compatibility
+        std::string password = "admin";  // Node-RED compatibility
         bool websocket = false;
         int ws_port = 8080;
         std::string ws_path = "/";
