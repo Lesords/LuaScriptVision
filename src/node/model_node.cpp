@@ -741,37 +741,35 @@ void ModelNode::inferLoop() {
                     int fh = event_data.value("frame_height", 0);
                     preview_data["resolution"] = {fw, fh};
 
-                    // base64 JPEG image when output_ (debug) is enabled
-                    if (output_) {
-                        try {
-                            cv::Mat mat = ctx->frame->frame().to_mat_copy();
-                            if (!mat.empty()) {
-                                std::vector<uchar> jpeg_buf;
-                                std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 80};
-                                if (cv::imencode(".jpg", mat, jpeg_buf, params)) {
-                                    // base64 encode using standard alphabet
-                                    static const char* b64 =
-                                        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-                                    std::string encoded;
-                                    encoded.reserve(((jpeg_buf.size() + 2) / 3) * 4);
-                                    for (size_t i = 0; i < jpeg_buf.size(); i += 3) {
-                                        uint32_t v = (uint32_t)jpeg_buf[i] << 16;
-                                        if (i + 1 < jpeg_buf.size()) v |= (uint32_t)jpeg_buf[i+1] << 8;
-                                        if (i + 2 < jpeg_buf.size()) v |= jpeg_buf[i+2];
-                                        encoded += b64[(v >> 18) & 0x3f];
-                                        encoded += b64[(v >> 12) & 0x3f];
-                                        encoded += (i + 1 < jpeg_buf.size()) ? b64[(v >> 6) & 0x3f] : '=';
-                                        encoded += (i + 2 < jpeg_buf.size()) ? b64[v & 0x3f] : '=';
-                                    }
-                                    preview_data["image"] = std::move(encoded);
+                    // base64 JPEG image when websocket is active (always include for preview display)
+                    // This allows preview.html to show the camera feed without requiring debug mode
+                    try {
+                        cv::Mat mat = ctx->frame->frame().to_mat_copy();
+                        if (!mat.empty()) {
+                            std::vector<uchar> jpeg_buf;
+                            std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 75};
+                            if (cv::imencode(".jpg", mat, jpeg_buf, params)) {
+                                static const char* b64 =
+                                    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                                std::string encoded;
+                                encoded.reserve(((jpeg_buf.size() + 2) / 3) * 4);
+                                for (size_t i = 0; i < jpeg_buf.size(); i += 3) {
+                                    uint32_t v = (uint32_t)jpeg_buf[i] << 16;
+                                    if (i + 1 < jpeg_buf.size()) v |= (uint32_t)jpeg_buf[i+1] << 8;
+                                    if (i + 2 < jpeg_buf.size()) v |= jpeg_buf[i+2];
+                                    encoded += b64[(v >> 18) & 0x3f];
+                                    encoded += b64[(v >> 12) & 0x3f];
+                                    encoded += (i + 1 < jpeg_buf.size()) ? b64[(v >> 6) & 0x3f] : '=';
+                                    encoded += (i + 2 < jpeg_buf.size()) ? b64[v & 0x3f] : '=';
                                 }
+                                preview_data["image"] = std::move(encoded);
                             }
-                        } catch (...) {}
-                    }
+                        }
+                    } catch (...) {}
 
                     nlohmann::json ws_msg = {{"data", std::move(preview_data)}};
                     std::string payload = ws_msg.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
-                    if (ws_->broadcast_text(payload.c_str(), payload.size())) {
+                    if (ws_->broadcast_binary(reinterpret_cast<const uint8_t*>(payload.c_str()), payload.size())) {
                         ws_event_count_.fetch_add(1, std::memory_order_relaxed);
                     }
                 } catch (const std::exception& e) {
