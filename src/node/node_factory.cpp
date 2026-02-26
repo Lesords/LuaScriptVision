@@ -2,6 +2,8 @@
 #include "node_server.h"
 #include "data_node.h"
 
+#include <iostream>
+
 #ifdef USE_CVI_MPI
 #include "camera_node.h"
 #endif
@@ -24,7 +26,7 @@ Node* NodeFactory::create(const std::string& id,
                           const std::string& type,
                           const nlohmann::json& config,
                           const std::vector<std::string>& dependencies) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::mutex> lock(mutex_);
 
     last_error_code_ = MA_OK;
     last_error_reason_.clear();
@@ -77,23 +79,34 @@ Node* NodeFactory::create(const std::string& id,
     node->setServer(server_);
 
     // Setup dependencies (addDependency establishes bidirectional link)
+    // For Node-RED compatibility: don't fail if dependency doesn't exist yet
+    // The node will be started when all dependencies become ready
+    std::vector<std::string> missing_deps;
     for (const auto& dep_id : dependencies) {
         auto dep = nodes_.find(dep_id);
-        if (dep == nodes_.end()) {
-            last_error_code_ = MA_EINVAL;
-            last_error_reason_ = "Dependency not found: " + dep_id;
-            return nullptr;
+        if (dep != nodes_.end()) {
+            node->addDependency(dep->second.get());
+        } else {
+            // Dependency doesn't exist yet, record it
+            missing_deps.push_back(dep_id);
         }
-        node->addDependency(dep->second.get());
+    }
+
+    // Store pending dependencies if any
+    if (!missing_deps.empty()) {
+        pending_dependencies_[id] = missing_deps;
     }
 
     // Call onCreate
+    std::cout << "[NodeFactory] Calling onCreate for node " << id << " (type=" << type << ")" << std::endl;
     int ret = node->create(config);
     if (ret != MA_OK) {
+        std::cout << "[NodeFactory] onCreate failed for " << id << " with code " << ret << std::endl;
         last_error_code_ = ret;
         last_error_reason_ = "Node onCreate failed with code " + std::to_string(ret);
         return nullptr;
     }
+    std::cout << "[NodeFactory] onCreate succeeded for " << id << std::endl;
 
     // Track singleton
     if (it->second.singleton) {
@@ -117,9 +130,51 @@ Node* NodeFactory::create(const std::string& id,
         setupDataFlow(data_node, dependencies);
     }
 
-    // Auto-start if all dependencies ready
+    // Collect nodes that need to be started (to start them outside the factory lock,
+    // because onStart() may block for hundreds of ms, e.g. camera open + ISP warmup)
+    std::vector<Node*> to_start;
+
     if (ptr->allDependenciesReady()) {
-        ptr->start();
+        to_start.push_back(ptr);
+    }
+
+    // Check if this newly created node is a pending dependency for any other nodes
+    // This handles the case where dependent nodes are created before their dependencies
+    for (auto& [other_id, other_node] : nodes_) {
+        if (other_id == id) continue;  // Skip self
+
+        auto pending_it = pending_dependencies_.find(other_id);
+        if (pending_it != pending_dependencies_.end()) {
+            auto& pending_deps = pending_it->second;
+            auto dep_it = std::find(pending_deps.begin(), pending_deps.end(), id);
+            if (dep_it != pending_deps.end()) {
+                // This node was a pending dependency, establish the link now
+                other_node->addDependency(ptr);
+                pending_deps.erase(dep_it);
+
+                // Setup data flow if the other node is a DataNode
+                if (auto* data_node = dynamic_cast<DataNode*>(other_node.get())) {
+                    std::vector<std::string> deps = {id};
+                    setupDataFlow(data_node, deps);
+                }
+
+                // If all pending dependencies are resolved, queue start
+                if (pending_deps.empty()) {
+                    pending_dependencies_.erase(pending_it);
+                    if (other_node->allDependenciesReady() && !other_node->isStarted()) {
+                        to_start.push_back(other_node.get());
+                    }
+                }
+            }
+        }
+    }
+
+    // Release factory lock before calling start() so that long-running onStart()
+    // (e.g. CameraNode: sensor init + 300ms ISP warmup) doesn't block MQTT message handling
+    lock.unlock();
+
+    for (Node* n : to_start) {
+        n->start();
     }
 
     return ptr;
@@ -140,15 +195,24 @@ int NodeFactory::destroy(const std::string& id) {
     }
 
     Node* node = it->second.get();
+    std::cout << "[NodeFactory] destroy() called for " << id
+              << " (type=" << node->type() << ")" << std::endl;
 
     // Collect all dependents first (recursive)
     std::vector<std::string> to_destroy;
     collectDependents(node, to_destroy);
 
+    std::cout << "[NodeFactory] Dependents to destroy first: " << to_destroy.size() << std::endl;
+    for (const auto& dep_id : to_destroy) {
+        std::cout << "[NodeFactory]   - " << dep_id << std::endl;
+    }
+
     // Destroy dependents first (reverse dependency order)
     for (const auto& dep_id : to_destroy) {
         auto dep_it = nodes_.find(dep_id);
         if (dep_it != nodes_.end()) {
+            std::cout << "[NodeFactory] Destroying dependent: " << dep_id
+                      << " (type=" << dep_it->second->type() << ")" << std::endl;
             // Teardown data flow before destroying
             if (auto* data_node = dynamic_cast<DataNode*>(dep_it->second.get())) {
                 teardownDataFlow(data_node);
@@ -191,6 +255,15 @@ int NodeFactory::destroy(const std::string& id) {
     }
 
     nodes_.erase(it);
+
+    // Clean up pending dependencies for this node
+    pending_dependencies_.erase(id);
+
+    // Also remove this node from other nodes' pending dependencies
+    for (auto& [node_id, deps] : pending_dependencies_) {
+        deps.erase(std::remove(deps.begin(), deps.end(), id), deps.end());
+    }
+
     return MA_OK;
 }
 
@@ -205,12 +278,16 @@ std::vector<std::string> NodeFactory::list() const {
 }
 
 int NodeFactory::start(const std::string& id) {
+    std::cout << "[NodeFactory] start() called for " << id << std::endl;
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = nodes_.find(id);
     if (it == nodes_.end()) {
+        std::cout << "[NodeFactory] Node " << id << " not found" << std::endl;
         return MA_ENOENT;
     }
-    return it->second->start();
+    int ret = it->second->start();
+    std::cout << "[NodeFactory] start() returned " << ret << " for " << id << std::endl;
+    return ret;
 }
 
 int NodeFactory::stop(const std::string& id) {
@@ -263,6 +340,8 @@ void NodeFactory::destroyAll() {
 
 void NodeFactory::collectDependents(Node* node, std::vector<std::string>& out) {
     for (const auto& [dep_id, dep] : node->dependents()) {
+        std::cout << "[NodeFactory] Collecting dependent: " << dep_id
+                  << " (type=" << dep->type() << ") of " << node->id() << std::endl;
         // Recursively collect dependents
         collectDependents(dep, out);
         out.push_back(dep_id);

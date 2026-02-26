@@ -73,6 +73,10 @@ private:
     std::map<std::string, NodeInfo> registry_;
     std::map<std::string, std::unique_ptr<Node>> nodes_;
     std::map<std::string, std::string> singleton_instances_;  // type -> id
+
+    // Pending dependencies: node_id -> list of dependency IDs it's waiting for
+    std::map<std::string, std::vector<std::string>> pending_dependencies_;
+
     NodeServer* server_ = nullptr;
     int last_error_code_ = MA_OK;
     std::string last_error_reason_;
