@@ -16,11 +16,14 @@ struct mosquitto_message;
 
 namespace node {
 
-// MQTT message types (compatible with sscma-node)
+// MQTT message types (compatible with node-red-contrib-sscma)
+// Values MUST match constants.js: RESPONSE=0, EVENT=1, LOG=2, REQUEST=3, HEARTBEAT=4
 enum class MessageType {
-    RESPONSE = 1,
-    EVENT = 2,
-    REQUEST = 3
+    RESPONSE = 0,
+    EVENT = 1,
+    LOG = 2,
+    REQUEST = 3,
+    HEARTBEAT = 4
 };
 
 class NodeServer {
@@ -69,6 +72,8 @@ private:
     void onMessage(const std::string& topic, const std::string& payload);
     void handleRequest(const std::string& node_id, const nlohmann::json& msg);
     int handleCreate(const std::string& node_id, const nlohmann::json& data);
+    int handleClear();  // Global command: clear all nodes
+    int handleHealth(); // Global command: health check
     std::string extractNodeId(const std::string& topic);
 
     // Static callbacks for mosquitto
