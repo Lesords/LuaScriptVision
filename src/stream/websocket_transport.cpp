@@ -61,6 +61,15 @@ struct WebSocketTransport::Impl {
                 self->clients.push_back(c);
                 self->owner->client_count_.store(
                     static_cast<int>(self->clients.size()), std::memory_order_relaxed);
+                // Request an IDR frame so the new client receives a complete I-frame immediately.
+                std::function<void()> cb;
+                {
+                    std::lock_guard<std::mutex> lock(self->owner->cb_mutex_);
+                    cb = self->owner->new_client_cb_;
+                }
+                if (cb) {
+                    cb();
+                }
                 break;
             }
 
@@ -216,6 +225,11 @@ bool WebSocketTransport::enqueue_frame(PayloadType type,
 
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
+        // Limit queue depth to 3 frames to prevent burst delivery on network jitter.
+        // Drop oldest frame when full so the client always gets the most recent data.
+        if (queue_.size() >= 3) {
+            queue_.erase(queue_.begin());
+        }
         queue_.push_back(std::move(frame));
     }
 

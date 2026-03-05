@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -43,6 +44,13 @@ public:
     int client_count() const { return client_count_.load(std::memory_order_relaxed); }
     const Config& config() const { return config_; }
 
+    // Called on the mongoose IO thread whenever a new WebSocket client connects.
+    // Register encoder_->request_idr() here so new clients get an I-frame immediately.
+    void set_new_client_callback(std::function<void()> cb) {
+        std::lock_guard<std::mutex> lock(cb_mutex_);
+        new_client_cb_ = std::move(cb);
+    }
+
 private:
 #ifdef USE_MONGOOSE_WS
     struct BroadcastFrame {
@@ -61,6 +69,9 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<int> client_count_{0};
     std::thread io_thread_;
+
+    mutable std::mutex cb_mutex_;
+    std::function<void()> new_client_cb_;
 
 #ifdef USE_MONGOOSE_WS
     mutable std::mutex queue_mutex_;
