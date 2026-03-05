@@ -744,6 +744,15 @@ void ModelNode::inferLoop() {
                     // base64 JPEG image when websocket is active (always include for preview display)
                     // This allows preview.html to show the camera feed without requiring debug mode
                     try {
+                        static constexpr int kJpegIntervalMs = 200; // ≤5fps JPEG preview
+                        auto now_tp = std::chrono::steady_clock::now();
+                        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            now_tp - last_jpeg_time_).count();
+
+                        if (elapsed_ms < kJpegIntervalMs) {
+                            preview_data["image"] = ""; // skip this frame
+                        } else {
+                        last_jpeg_time_ = now_tp;
                         cv::Mat mat = ctx->frame->frame().to_mat_copy();
 
                         if (!mat.empty()) {
@@ -772,6 +781,7 @@ void ModelNode::inferLoop() {
                                 preview_data["image"] = std::move(encoded);
                             }
                         }
+                        } // end else (JPEG rate limit interval)
                     } catch (...) {}
 
                     nlohmann::json ws_msg = {{"data", std::move(preview_data)}};

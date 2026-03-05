@@ -5,6 +5,7 @@
 #include "luaref_json.h"
 
 #include <atomic>
+#include <chrono>
 #include <memory>
 #include <string>
 #include <thread>
@@ -99,6 +100,7 @@ private:
     std::atomic<uint64_t> infer_count_{0};
     std::atomic<uint64_t> error_count_{0};
     std::atomic<uint64_t> ws_event_count_{0};
+    std::chrono::steady_clock::time_point last_jpeg_time_{};
     double infer_ema_ms_ = 0.0;
     static constexpr double kEmaAlpha = 0.2;
 };
