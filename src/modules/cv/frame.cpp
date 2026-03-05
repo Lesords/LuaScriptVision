@@ -416,7 +416,11 @@ void Frame::ensure_mapped() const {
     int stride = static_cast<int>(cvi_frame_.stVFrame.u32Stride[0]);
 
     if (format_ == PixelFormat::BGR || format_ == PixelFormat::RGB) {
-        mapped_view_ = cv::Mat(h, w, CV_8UC3, base, stride);
+        // CVI may report u32Stride[0] as pixel-width (not byte-width) for RGB888.
+        // Derive actual byte stride from u32Length[0]/h to handle this driver quirk.
+        uint32_t len0 = cvi_frame_.stVFrame.u32Length[0];
+        int byte_stride = (len0 > 0 && h > 0) ? static_cast<int>(len0 / h) : stride;
+        mapped_view_ = cv::Mat(h, w, CV_8UC3, base, byte_stride);
     } else if (format_ == PixelFormat::GRAY) {
         mapped_view_ = cv::Mat(h, w, CV_8UC1, base, stride);
     } else if (format_ == PixelFormat::NV12 || format_ == PixelFormat::NV21) {
