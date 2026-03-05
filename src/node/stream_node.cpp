@@ -277,7 +277,7 @@ void StreamNode::encodeLoop() {
         }
 
         if (ws_) {
-            if (ws_->broadcast_binary(stream.data.data(), stream.data.size())) {
+            if (ws_->broadcast_binary(stream.data.data(), stream.data.size(), stream.is_keyframe)) {
                 ws_frame_count++;
                 ws_frames_.store(ws_frame_count, std::memory_order_release);
             }

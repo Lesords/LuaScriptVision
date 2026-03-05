@@ -538,7 +538,7 @@ void CameraNode::streamEncodeLoop() {
 
         // Broadcast via WebSocket (pure H.264 binary)
         if (ws) {
-            ws->broadcast_binary(stream.data.data(), stream.data.size());
+            ws->broadcast_binary(stream.data.data(), stream.data.size(), stream.is_keyframe);
             frame_count++;
         }
 
