@@ -177,6 +177,13 @@ int StreamNode::onStart() {
             encoder_.reset();
             return MA_EIO;
         }
+        // Request IDR when a new browser client connects so it gets a full I-frame.
+        auto* enc_ptr = encoder_.get();
+        ws_->set_new_client_callback([enc_ptr]() {
+            if (enc_ptr) {
+                enc_ptr->request_idr();
+            }
+        });
         event("websocket", MA_OK, {
             {"port", config_.ws_port},
             {"path", config_.ws_path},
