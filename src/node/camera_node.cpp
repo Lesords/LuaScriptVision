@@ -8,6 +8,8 @@
 #ifdef USE_CVI_CAMERA
 #include "modules/cv/mmf_context.h"
 #include "modules/cv/cvi_camera.h"
+#include "stream/venc_encoder.h"
+#include "stream/websocket_transport.h"
 #endif
 
 namespace node {
@@ -44,6 +46,22 @@ int CameraNode::onCreate(const nlohmann::json& config) {
     }
     if (config.contains("enable_inference")) {
         config_.enable_inference = config["enable_inference"].get<bool>();
+    }
+    // sscma-node compatibility config
+    if (config.contains("websocket")) {
+        config_.websocket = config["websocket"].get<bool>();
+    }
+    if (config.contains("ws_port")) {
+        config_.ws_port = config["ws_port"].get<int>();
+    }
+    if (config.contains("bitrate_kbps")) {
+        config_.bitrate_kbps = config["bitrate_kbps"].get<int>();
+    }
+    if (config.contains("stream_to_frontend")) {
+        config_.stream_to_frontend = config["stream_to_frontend"].get<bool>();
+    }
+    if (config.contains("venc_channel")) {
+        config_.venc_channel = config["venc_channel"].get<int>();
     }
 
 #ifdef USE_CVI_CAMERA
@@ -87,6 +105,22 @@ int CameraNode::onStart() {
     running_.store(true, std::memory_order_release);
     capture_thread_ = std::thread(&CameraNode::captureLoop, this);
 
+#ifdef USE_CVI_CAMERA
+    // sscma-node compatibility: Start internal VENC
+    if (config_.websocket && config_.stream_to_frontend) {
+        if (!initStreamEncoder()) {
+            event("error", MA_EIO, {{"message", "Failed to init stream encoder"}});
+        } else {
+            // Send event to notify frontend WebSocket is ready
+            event("websocket", MA_OK, {
+                {"port", config_.ws_port},
+                {"codec", "h264"},
+                {"type", "video"}
+            });
+        }
+    }
+#endif
+
     // Notify Node-RED that camera is active
     event("enabled", MA_OK, {{"value", true}});
 
@@ -94,6 +128,28 @@ int CameraNode::onStart() {
 }
 
 int CameraNode::onStop() {
+#ifdef USE_CVI_CAMERA
+    // sscma-node compatibility: Stop stream encoder
+    if (stream_encoder_.running.load(std::memory_order_acquire)) {
+        stream_encoder_.running.store(false, std::memory_order_release);
+        if (stream_encoder_.encode_thread.joinable()) {
+            stream_encoder_.encode_thread.join();
+        }
+    }
+
+    // Cleanup WebSocket
+    if (stream_encoder_.ws) {
+        stream_encoder_.ws->stop();
+        stream_encoder_.ws.reset();
+    }
+
+    // Cleanup VENC
+    if (stream_encoder_.encoder) {
+        stream_encoder_.encoder->shutdown();
+        stream_encoder_.encoder.reset();
+    }
+#endif
+
     stopCapture();
 
 #ifdef USE_CVI_CAMERA
@@ -405,5 +461,90 @@ void CameraNode::cleanupVbPools() {
     lua_cv::MmfContext::instance().shutdown();
 #endif
 }
+
+#ifdef USE_CVI_CAMERA
+bool CameraNode::initStreamEncoder() {
+    if (!camera_ || !camera_->is_opened()) {
+        return false;
+    }
+
+    // Configure VENC with channel 2 (sscma-node compatible CHN_H264)
+    lua_cv::VencEncoder::Config enc_cfg;
+    enc_cfg.channel = static_cast<VENC_CHN>(config_.venc_channel);  // Default 2
+    enc_cfg.width = static_cast<uint32_t>(config_.width);
+    enc_cfg.height = static_cast<uint32_t>(config_.height);
+    enc_cfg.fps = static_cast<uint32_t>(config_.fps);
+    enc_cfg.bitrate_kbps = static_cast<uint32_t>(config_.bitrate_kbps);
+    enc_cfg.codec = lua_cv::VencEncoder::CodecType::H264;
+    enc_cfg.gop = 30;  // 1 second between keyframes
+
+    // Create VENC
+    stream_encoder_.encoder = std::make_unique<lua_cv::VencEncoder>(enc_cfg);
+    if (!stream_encoder_.encoder->init()) {
+        return false;
+    }
+
+    // Bind to VPSS Stream Channel
+    int vpss_grp = camera_->vpss_group();
+    int vpss_chn = camera_->vpss_stream_channel();
+    if (!stream_encoder_.encoder->bind_to_vpss(
+            static_cast<VPSS_GRP>(vpss_grp),
+            static_cast<VPSS_CHN>(vpss_chn))) {
+        stream_encoder_.encoder->shutdown();
+        return false;
+    }
+
+    // Create WebSocket
+    lua_cv::WebSocketTransport::Config ws_cfg;
+    ws_cfg.port = config_.ws_port;
+    ws_cfg.path = "/";  // Root path
+    stream_encoder_.ws = std::make_unique<lua_cv::WebSocketTransport>(ws_cfg);
+    if (!stream_encoder_.ws->start()) {
+        stream_encoder_.encoder->shutdown();
+        return false;
+    }
+
+    // Request IDR when a new browser client connects so it gets a full I-frame.
+    auto* enc_ptr = stream_encoder_.encoder.get();
+    stream_encoder_.ws->set_new_client_callback([enc_ptr]() {
+        if (enc_ptr) {
+            enc_ptr->request_idr();
+        }
+    });
+
+    // Start encode thread
+    stream_encoder_.running.store(true, std::memory_order_release);
+    stream_encoder_.encode_thread = std::thread(&CameraNode::streamEncodeLoop, this);
+
+    return true;
+}
+
+void CameraNode::streamEncodeLoop() {
+    auto& encoder = stream_encoder_.encoder;
+    auto& ws = stream_encoder_.ws;
+    auto& running = stream_encoder_.running;
+
+    uint64_t frame_count = 0;
+    running.store(true, std::memory_order_release);
+
+    while (running.load(std::memory_order_acquire)) {
+        if (!encoder) break;
+
+        // Get encoded stream
+        lua_cv::VencEncoder::EncodedStream stream;
+        if (!encoder->get_stream(&stream, 1000)) {
+            continue;
+        }
+
+        // Broadcast via WebSocket (pure H.264 binary)
+        if (ws) {
+            ws->broadcast_binary(stream.data.data(), stream.data.size());
+            frame_count++;
+        }
+
+        encoder->release_stream();
+    }
+}
+#endif
 
 } // namespace node
