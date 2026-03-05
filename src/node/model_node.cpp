@@ -745,7 +745,14 @@ void ModelNode::inferLoop() {
                     // This allows preview.html to show the camera feed without requiring debug mode
                     try {
                         cv::Mat mat = ctx->frame->frame().to_mat_copy();
+
                         if (!mat.empty()) {
+                            // to_mat_copy() returns raw RGB data for PixelFormat::RGB frames,
+                            // but cv::imencode expects BGR. Convert before encoding.
+                            if (ctx->frame->frame().pixel_format() == lua_cv::PixelFormat::RGB) {
+                                cv::cvtColor(mat, mat, cv::COLOR_RGB2BGR);
+                            }
+
                             std::vector<uchar> jpeg_buf;
                             std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, 75};
                             if (cv::imencode(".jpg", mat, jpeg_buf, params)) {
