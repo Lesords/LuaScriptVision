@@ -195,8 +195,8 @@ void WebSocketTransport::stop() {
     client_count_.store(0, std::memory_order_relaxed);
 }
 
-bool WebSocketTransport::broadcast_binary(const uint8_t* data, size_t length) {
-    return enqueue_frame(PayloadType::Binary, data, length);
+bool WebSocketTransport::broadcast_binary(const uint8_t* data, size_t length, bool is_keyframe) {
+    return enqueue_frame(PayloadType::Binary, data, length, is_keyframe);
 }
 
 bool WebSocketTransport::broadcast_text(const char* data, size_t length) {
@@ -207,7 +207,8 @@ bool WebSocketTransport::broadcast_text(const char* data, size_t length) {
 
 bool WebSocketTransport::enqueue_frame(PayloadType type,
                                        const uint8_t* data,
-                                       size_t length) {
+                                       size_t length,
+                                       bool is_keyframe) {
     if (!running_.load(std::memory_order_acquire)) {
         return false;
     }
@@ -217,18 +218,29 @@ bool WebSocketTransport::enqueue_frame(PayloadType type,
 
 #ifndef USE_MONGOOSE_WS
     (void)type;
+    (void)is_keyframe;
     return false;
 #else
     BroadcastFrame frame;
     frame.type = type;
     frame.data.assign(data, data + length);
+    frame.is_keyframe = is_keyframe;
 
     {
         std::lock_guard<std::mutex> lock(queue_mutex_);
-        // Limit queue depth to 3 frames to prevent burst delivery on network jitter.
-        // Drop oldest frame when full so the client always gets the most recent data.
-        if (queue_.size() >= 3) {
-            queue_.erase(queue_.begin());
+        if (queue_.size() >= static_cast<size_t>(config_.queue_depth)) {
+            if (!is_keyframe) {
+                // P-frame with full queue: drop this frame to protect existing I-frames.
+                return true;
+            }
+            // I-frame with full queue: evict the oldest P-frame to make room.
+            auto it = std::find_if(queue_.begin(), queue_.end(),
+                                   [](const BroadcastFrame& f) { return !f.is_keyframe; });
+            if (it != queue_.end()) {
+                queue_.erase(it);
+            } else {
+                queue_.erase(queue_.begin());
+            }
         }
         queue_.push_back(std::move(frame));
     }
