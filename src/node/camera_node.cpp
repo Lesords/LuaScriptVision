@@ -262,6 +262,16 @@ bool CameraNode::get_stream_binding(int* vpss_grp, int* vpss_chn) const {
 #endif
 }
 
+void CameraNode::setInferPadValue(uint8_t pad_value) {
+#ifdef USE_CVI_CAMERA
+    if (camera_) {
+        camera_->set_infer_pad_value(pad_value);
+    }
+#else
+    (void)pad_value;
+#endif
+}
+
 void CameraNode::captureLoop() {
     while (running_.load(std::memory_order_acquire)) {
 #ifdef USE_CVI_CAMERA

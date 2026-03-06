@@ -25,6 +25,7 @@ public:
         PixelFormat format = PixelFormat::UNKNOWN;
         int vpss_grp = -1;
         bool enable_infer = true;
+        uint8_t infer_pad_value = 114;
     };
 
     CviCamera();
@@ -53,6 +54,7 @@ public:
     int vpss_group() const { return static_cast<int>(vpss_grp_); }
     int vpss_stream_channel() const { return static_cast<int>(vpss_stream_chn_); }
     int vpss_infer_channel() const { return static_cast<int>(vpss_chn_); }
+    void set_infer_pad_value(uint8_t pad_value);
 
 private:
     bool read_internal(Frame& frame, int timeout_ms, bool log_error);

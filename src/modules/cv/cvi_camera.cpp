@@ -646,6 +646,33 @@ bool CviCamera::read(Frame& frame, int timeout_ms, bool log_error) {
     return read_internal(frame, timeout_ms, log_error);
 }
 
+void CviCamera::set_infer_pad_value(uint8_t pad_value) {
+    config_.infer_pad_value = pad_value;
+    if (!opened_ || !config_.enable_infer || !vpss_chn_enabled_) {
+        return;
+    }
+
+    VPSS_CHN_ATTR_S chn_attr{};
+    CVI_S32 rc = CVI_VPSS_GetChnAttr(vpss_grp_, vpss_chn_, &chn_attr);
+    if (rc != CVI_SUCCESS) {
+        std::cerr << "[WARN] CviCamera::set_infer_pad_value - CVI_VPSS_GetChnAttr failed: 0x"
+                  << std::hex << rc << std::dec << std::endl;
+        return;
+    }
+
+    chn_attr.stAspectRatio.enMode = ASPECT_RATIO_AUTO;
+    chn_attr.stAspectRatio.bEnableBgColor = CVI_TRUE;
+    chn_attr.stAspectRatio.u32BgColor =
+        (static_cast<CVI_U32>(pad_value) << 16) |
+        (static_cast<CVI_U32>(pad_value) << 8) |
+        static_cast<CVI_U32>(pad_value);
+    rc = CVI_VPSS_SetChnAttr(vpss_grp_, vpss_chn_, &chn_attr);
+    if (rc != CVI_SUCCESS) {
+        std::cerr << "[WARN] CviCamera::set_infer_pad_value - CVI_VPSS_SetChnAttr failed: 0x"
+                  << std::hex << rc << std::dec << std::endl;
+    }
+}
+
 bool CviCamera::wait_for_ready(int timeout_ms) {
     if (!opened_) {
         std::cerr << "[ERROR] CviCamera::wait_for_ready - camera not opened" << std::endl;

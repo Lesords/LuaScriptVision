@@ -553,6 +553,11 @@ int ModelNode::onStart() {
 
     running_.store(true, std::memory_order_release);
 
+    // When model preview resolution is 640x640, force infer padding to white.
+    if (upstream_camera_) {
+        upstream_camera_->setInferPadValue(preview_resolution_640_ ? 255 : 114);
+    }
+
     if (websocket_) {
         lua_cv::WebSocketTransport::Config ws_cfg;
         ws_cfg.port = ws_port_;
