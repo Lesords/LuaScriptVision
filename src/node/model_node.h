@@ -83,6 +83,7 @@ private:
     int ws_max_clients_ = 8;
     bool output_ = false;
     bool debug_ = false;
+    bool preview_resolution_640_ = false;  // True if model input is 640x640
 
     // TPU Session
     std::unique_ptr<inference::CviSession> session_;

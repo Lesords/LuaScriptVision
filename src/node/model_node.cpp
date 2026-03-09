@@ -480,6 +480,10 @@ int ModelNode::onCreate(const nlohmann::json& config) {
     fclose(f);
 #endif
 
+    // Set preview_resolution_640_ based on input size
+    preview_resolution_640_ = (preprocess_config_.input_width == 640 &&
+                               preprocess_config_.input_height == 640);
+
     // 6. Validate CROPPED_ROI mode constraints
     // CROPPED_ROI mode requires upstream ModelNode and select_rois in script
     if (input_mode_ == CROPPED_ROI) {
