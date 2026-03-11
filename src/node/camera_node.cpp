@@ -48,6 +48,12 @@ int CameraNode::onCreate(const nlohmann::json& config) {
     if (config.contains("enable_inference")) {
         config_.enable_inference = config["enable_inference"].get<bool>();
     }
+    if (config.contains("preview")) {
+        config_.preview = config["preview"].get<bool>();
+    }
+    if (config.contains("light")) {
+        config_.light = config["light"].get<int>();
+    }
 
     std::cout << "[CameraNode] Configuration: " << config_.width << "x" << config_.height
               << " @ " << config_.fps << " fps, sensor=" << config_.sensor
@@ -224,6 +230,32 @@ int CameraNode::onControl(const std::string& action, const nlohmann::json& data)
         config_.infer_fps_limit = data.at("value").get<double>();
         ResourceEstimator::instance().register_camera(
             id_, frame_skip_enabled(), infer_fps_limit());
+        return MA_OK;
+    }
+
+    if (action == "preview") {
+        if (!data.contains("value")) {
+            return MA_EINVAL;
+        }
+        config_.preview = data.at("value").get<bool>();
+        response("preview", MA_OK, {{"preview", config_.preview}});
+        return MA_OK;
+    }
+
+    if (action == "light") {
+        if (!data.contains("value")) {
+            return MA_EINVAL;
+        }
+        config_.light = data.at("value").get<int>();
+        response("light", MA_OK, {{"light", config_.light}});
+        return MA_OK;
+    }
+
+    if (action == "enabled") {
+        bool enabled = data.value("value", true);
+        inference_enabled_.store(enabled, std::memory_order_release);
+        std::cout << "[CameraNode] Inference " << (enabled ? "enabled" : "disabled") << std::endl;
+        event("enabled", MA_OK, {{"value", enabled}});
         return MA_OK;
     }
 
