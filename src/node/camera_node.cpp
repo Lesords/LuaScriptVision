@@ -102,6 +102,13 @@ int CameraNode::onCreate(const nlohmann::json& config) {
     }
 #endif
 
+    // Send create response with configuration
+    response("create", MA_OK, {
+        {"width", config_.width},
+        {"height", config_.height},
+        {"fps", static_cast<int>(config_.fps)}
+    });
+
     return MA_OK;
 }
 
@@ -149,6 +156,8 @@ int CameraNode::onStart() {
     }
 #endif
 
+    // Send enabled event - data must be direct boolean for frontend comparison
+    event("enabled", MA_OK, true);
     return MA_OK;
 }
 
@@ -183,6 +192,9 @@ int CameraNode::onStop() {
     }
 #endif
 
+    // Send enabled event - data must be direct boolean for frontend comparison
+    event("enabled", MA_OK, false);
+
     return MA_OK;
 }
 
@@ -216,37 +228,53 @@ int CameraNode::onControl(const std::string& action, const nlohmann::json& data)
     }
 
     if (action == "set_fps") {
-        if (!data.contains("value")) {
+        // Support both formats: {"value": N} or direct number
+        if (data.contains("value")) {
+            config_.fps = data.at("value").get<double>();
+        } else if (data.is_number()) {
+            config_.fps = data.get<double>();
+        } else {
             return MA_EINVAL;
         }
-        config_.fps = data.at("value").get<double>();
         return MA_OK;
     }
 
     if (action == "set_infer_fps_limit") {
-        if (!data.contains("value")) {
+        // Support both formats: {"value": N} or direct number
+        if (data.contains("value")) {
+            config_.infer_fps_limit = data.at("value").get<double>();
+        } else if (data.is_number()) {
+            config_.infer_fps_limit = data.get<double>();
+        } else {
             return MA_EINVAL;
         }
-        config_.infer_fps_limit = data.at("value").get<double>();
         ResourceEstimator::instance().register_camera(
             id_, frame_skip_enabled(), infer_fps_limit());
         return MA_OK;
     }
 
     if (action == "preview") {
-        if (!data.contains("value")) {
+        // Support both formats: {"value": bool} or direct boolean
+        if (data.contains("value")) {
+            config_.preview = data.at("value").get<bool>();
+        } else if (data.is_boolean()) {
+            config_.preview = data.get<bool>();
+        } else {
             return MA_EINVAL;
         }
-        config_.preview = data.at("value").get<bool>();
         response("preview", MA_OK, {{"preview", config_.preview}});
         return MA_OK;
     }
 
     if (action == "light") {
-        if (!data.contains("value")) {
+        // Support both formats: {"value": N} or direct number N
+        if (data.contains("value")) {
+            config_.light = data.at("value").get<int>();
+        } else if (data.is_number()) {
+            config_.light = data.get<int>();
+        } else {
             return MA_EINVAL;
         }
-        config_.light = data.at("value").get<int>();
         response("light", MA_OK, {{"light", config_.light}});
         return MA_OK;
     }
@@ -255,7 +283,8 @@ int CameraNode::onControl(const std::string& action, const nlohmann::json& data)
         bool enabled = data.value("value", true);
         inference_enabled_.store(enabled, std::memory_order_release);
         std::cout << "[CameraNode] Inference " << (enabled ? "enabled" : "disabled") << std::endl;
-        event("enabled", MA_OK, {{"value", enabled}});
+        // Send event - data must be direct boolean for frontend comparison
+        event("enabled", MA_OK, enabled);
         return MA_OK;
     }
 

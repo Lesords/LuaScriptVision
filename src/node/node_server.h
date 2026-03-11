@@ -17,9 +17,11 @@ struct mosquitto_message;
 namespace node {
 
 // MQTT message types (compatible with sscma-node)
+// type: 0 = RESPONSE, 1 = EVENT, 2 = LOG, 3 = REQUEST
 enum class MessageType {
-    RESPONSE = 1,
-    EVENT = 2,
+    RESPONSE = 0,
+    EVENT = 1,
+    LOG = 2,
     REQUEST = 3
 };
 
