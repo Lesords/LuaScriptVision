@@ -114,7 +114,8 @@ set(CMAKE_FIND_ROOT_PATH
 # =============================================================================
 # Package Hints (help CMake find target packages)
 # =============================================================================
-# OpenCV
+# OpenCV - Try multiple possible locations
+set(CMAKE_PREFIX_PATH "${CMAKE_PREFIX_PATH}" "${TPU_SDK_ROOT}/lib/cmake" "${TPU_SDK_ROOT}/share")
 set(OpenCV_DIR "${TPU_SDK_ROOT}/lib/cmake/opencv4" CACHE PATH "OpenCV config path")
 
 # Workaround for OpenCV SDK packaging issue:

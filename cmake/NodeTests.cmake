@@ -45,6 +45,7 @@ add_executable(test_node_factory
     src/modules/cv/cvi_sensor.cpp
     ${CV_SOURCES}
     ${MEMORY_SOURCES}
+    ${STREAM_SOURCES}
 )
 
 target_include_directories(test_node_factory PRIVATE
@@ -53,6 +54,7 @@ target_include_directories(test_node_factory PRIVATE
     ${MOSQUITTO_INCLUDE_DIR}
     ${OpenCV_INCLUDE_DIRS}
     ${NODE_TEST_CAMERA_INCLUDES}
+    ${CVI_RTSP_INCLUDE_DIR}
 )
 
 target_compile_definitions(test_node_factory PRIVATE USE_CVI_MPI USE_CVI_CAMERA)
@@ -70,6 +72,7 @@ target_link_libraries(test_node_factory PRIVATE
 )
 target_link_cvi_isp(test_node_factory)
 target_link_cvi_mpi(test_node_factory)
+target_link_cvi_rtsp(test_node_factory)
 target_link_system_libs(test_node_factory)
 
 set_target_properties(test_node_factory PROPERTIES
@@ -137,6 +140,7 @@ add_executable(test_mqtt_protocol
     src/modules/cv/cvi_sensor.cpp
     ${CV_SOURCES}
     ${MEMORY_SOURCES}
+    ${STREAM_SOURCES}
 )
 
 target_include_directories(test_mqtt_protocol PRIVATE
@@ -145,6 +149,7 @@ target_include_directories(test_mqtt_protocol PRIVATE
     ${MOSQUITTO_INCLUDE_DIR}
     ${OpenCV_INCLUDE_DIRS}
     ${NODE_TEST_CAMERA_INCLUDES}
+    ${CVI_RTSP_INCLUDE_DIR}
 )
 
 target_compile_definitions(test_mqtt_protocol PRIVATE USE_CVI_MPI USE_CVI_CAMERA)
@@ -162,6 +167,7 @@ target_link_libraries(test_mqtt_protocol PRIVATE
 )
 target_link_cvi_isp(test_mqtt_protocol)
 target_link_cvi_mpi(test_mqtt_protocol)
+target_link_cvi_rtsp(test_mqtt_protocol)
 target_link_system_libs(test_mqtt_protocol)
 
 set_target_properties(test_mqtt_protocol PROPERTIES
@@ -179,7 +185,6 @@ add_executable(test_model_node
     src/node/node_server.cpp
     src/node/camera_node.cpp
     src/node/model_node.cpp
-    src/stream/websocket_transport.cpp
     src/node/executor.cpp
     src/node/resource_estimator.cpp
     ${TENSOR_SOURCES}
@@ -188,11 +193,8 @@ add_executable(test_model_node
     ${MODULE_SOURCES}
     ${BINDING_SOURCES}
     ${INFERENCE_SOURCES}
+    ${STREAM_SOURCES}
 )
-
-if(EXISTS "${MONGOOSE_SOURCE}")
-    target_sources(test_model_node PRIVATE "${MONGOOSE_SOURCE}")
-endif()
 
 target_include_directories(test_model_node PRIVATE
     ${SRC_COMMON_INCLUDES}
@@ -201,6 +203,7 @@ target_include_directories(test_model_node PRIVATE
     ${MOSQUITTO_INCLUDE_DIR}
     ${OpenCV_INCLUDE_DIRS}
     ${NODE_TEST_CAMERA_INCLUDES}
+    ${CVI_RTSP_INCLUDE_DIR}
 )
 
 target_link_libraries(test_model_node PRIVATE
@@ -222,6 +225,7 @@ target_link_libraries(test_model_node PRIVATE
     cares
     ${OpenCV_LIBS}
 )
+target_link_cvi_rtsp(test_model_node)
 target_link_system_libs(test_model_node)
 
 message(STATUS "test_model_node: ModelNode tests enabled")
@@ -251,6 +255,7 @@ add_executable(test_resource_estimator
     src/modules/cv/cvi_sensor.cpp
     ${CV_SOURCES}
     ${MEMORY_SOURCES}
+    ${STREAM_SOURCES}
 )
 
 target_include_directories(test_resource_estimator PRIVATE
@@ -259,6 +264,7 @@ target_include_directories(test_resource_estimator PRIVATE
     ${MOSQUITTO_INCLUDE_DIR}
     ${OpenCV_INCLUDE_DIRS}
     ${NODE_TEST_CAMERA_INCLUDES}
+    ${CVI_RTSP_INCLUDE_DIR}
 )
 
 target_compile_definitions(test_resource_estimator PRIVATE USE_CVI_MPI USE_CVI_CAMERA)
@@ -276,6 +282,7 @@ target_link_libraries(test_resource_estimator PRIVATE
 )
 target_link_cvi_isp(test_resource_estimator)
 target_link_cvi_mpi(test_resource_estimator)
+target_link_cvi_rtsp(test_resource_estimator)
 target_link_system_libs(test_resource_estimator)
 
 set_target_properties(test_resource_estimator PROPERTIES

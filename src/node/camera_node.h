@@ -14,6 +14,8 @@
 
 namespace lua_cv {
 class CviCamera;
+class VencEncoder;
+class WebSocketTransport;
 }
 
 namespace node {
@@ -64,12 +66,28 @@ private:
         std::string sensor = "ov5647";
         bool enable_stream = true;
         bool enable_inference = true;
+        bool preview = false;
+        int light = 0;
+        // sscma-node compatibility config
+        bool websocket = true;
+        int ws_port = 8080;
+        int bitrate_kbps = 4000;
+        bool stream_to_frontend = true;
+        int venc_channel = 2;
     } config_;
 
     // CV module components (reuse existing infrastructure)
     // Note: MmfContext is a singleton, accessed via MmfContext::instance()
 #ifdef USE_CVI_CAMERA
     std::unique_ptr<lua_cv::CviCamera> camera_;
+
+    // Stream encoder (sscma-node compatibility)
+    struct StreamEncoder {
+        std::atomic<bool> running{false};
+        std::unique_ptr<lua_cv::VencEncoder> encoder;
+        std::unique_ptr<lua_cv::WebSocketTransport> ws;
+        std::thread encode_thread;
+    } stream_encoder_;
 #endif
 
     // Capture thread
@@ -103,6 +121,9 @@ private:
     mutable std::mutex timing_mutex_;
     static constexpr auto kTimingStaleThreshold = std::chrono::seconds(5);
 
+    // Enable/disable inference distribution (controlled by "enabled" action)
+    std::atomic<bool> inference_enabled_{true};
+
     // Statistics
     std::atomic<uint64_t> frame_count_{0};
     std::atomic<uint64_t> skip_count_{0};
@@ -122,6 +143,12 @@ private:
     // VB pool management (reuse MMFContext)
     bool setupVbPools();
     void cleanupVbPools();
+
+#ifdef USE_CVI_CAMERA
+    // Stream encoder methods (sscma-node compatibility)
+    bool initStreamEncoder();
+    void streamEncodeLoop();
+#endif
 };
 
 } // namespace node

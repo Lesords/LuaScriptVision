@@ -3,11 +3,14 @@
 
 #include <algorithm>
 #include <chrono>
+#include <iostream>
 
 // Include CV modules when available
 #ifdef USE_CVI_CAMERA
 #include "modules/cv/mmf_context.h"
 #include "modules/cv/cvi_camera.h"
+#include "stream/venc_encoder.h"
+#include "stream/websocket_transport.h"
 #endif
 
 namespace node {
@@ -46,6 +49,33 @@ int CameraNode::onCreate(const nlohmann::json& config) {
         config_.enable_inference = config["enable_inference"].get<bool>();
     }
 
+    std::cout << "[CameraNode] Configuration: " << config_.width << "x" << config_.height
+              << " @ " << config_.fps << " fps, sensor=" << config_.sensor
+              << ", enable_stream=" << config_.enable_stream
+              << ", enable_inference=" << config_.enable_inference << std::endl;
+
+    // sscma-node compatibility config
+    if (config.contains("websocket")) {
+        config_.websocket = config["websocket"].get<bool>();
+    }
+    if (config.contains("ws_port")) {
+        config_.ws_port = config["ws_port"].get<int>();
+    }
+    if (config.contains("bitrate_kbps")) {
+        config_.bitrate_kbps = config["bitrate_kbps"].get<int>();
+    }
+    if (config.contains("stream_to_frontend")) {
+        config_.stream_to_frontend = config["stream_to_frontend"].get<bool>();
+    }
+    if (config.contains("venc_channel")) {
+        config_.venc_channel = config["venc_channel"].get<int>();
+    }
+
+    if (config_.websocket) {
+        std::cout << "[CameraNode] WebSocket enabled: port=" << config_.ws_port
+                  << ", stream_to_frontend=" << config_.stream_to_frontend << std::endl;
+    }
+
 #ifdef USE_CVI_CAMERA
     // Setup VB pools
     if (!setupVbPools()) {
@@ -78,19 +108,67 @@ int CameraNode::onStart() {
     // Open camera
     if (camera_ && !camera_->is_opened()) {
         if (!camera_->open()) {
+            std::cerr << "[CameraNode] Failed to open camera" << std::endl;
             event("error", MA_EIO, {{"message", "Failed to open camera"}});
             return MA_EIO;
         }
+        std::cout << "[CameraNode] Camera opened successfully" << std::endl;
     }
 #endif
 
     running_.store(true, std::memory_order_release);
     capture_thread_ = std::thread(&CameraNode::captureLoop, this);
 
+#ifdef USE_CVI_CAMERA
+    // sscma-node compatibility: Start internal VENC
+    if (config_.websocket && config_.stream_to_frontend) {
+#ifdef USE_CVI_MPI
+        std::cout << "[CameraNode] Initializing stream encoder..." << std::endl;
+        if (!initStreamEncoder()) {
+            std::cerr << "[CameraNode] Failed to init stream encoder" << std::endl;
+            event("error", MA_EIO, {{"message", "Failed to init stream encoder"}});
+        } else {
+            std::cout << "[CameraNode] Stream encoder initialized, sending websocket event" << std::endl;
+            // Send event to notify frontend WebSocket is ready
+            event("websocket", MA_OK, {
+                {"port", config_.ws_port},
+                {"codec", "h264"},
+                {"type", "video"}
+            });
+        }
+#else
+        std::cerr << "[CameraNode] WebSocket streaming not available (USE_CVI_MPI not defined)" << std::endl;
+        event("error", MA_EINVAL, {{"message", "WebSocket streaming requires USE_CVI_MPI"}});
+#endif
+    }
+#endif
+
     return MA_OK;
 }
 
 int CameraNode::onStop() {
+#ifdef USE_CVI_CAMERA
+    // sscma-node compatibility: Stop stream encoder
+    if (stream_encoder_.running.load(std::memory_order_acquire)) {
+        stream_encoder_.running.store(false, std::memory_order_release);
+        if (stream_encoder_.encode_thread.joinable()) {
+            stream_encoder_.encode_thread.join();
+        }
+    }
+
+    // Cleanup WebSocket
+    if (stream_encoder_.ws) {
+        stream_encoder_.ws->stop();
+        stream_encoder_.ws.reset();
+    }
+
+    // Cleanup VENC
+    if (stream_encoder_.encoder) {
+        stream_encoder_.encoder->shutdown();
+        stream_encoder_.encoder.reset();
+    }
+#endif
+
     stopCapture();
 
 #ifdef USE_CVI_CAMERA
@@ -249,7 +327,7 @@ bool CameraNode::processFrame(lua_cv::Frame& frame) {
     sf->set_frame_id(frame_id);
 
     // Distribute to inference channel subscribers
-    if (config_.enable_inference) {
+    if (config_.enable_inference && inference_enabled_.load(std::memory_order_acquire)) {
         distributeFrame(sf, frame_id, FrameChannel::INFER);
     }
 
@@ -390,4 +468,79 @@ void CameraNode::cleanupVbPools() {
 #endif
 }
 
+#ifdef USE_CVI_CAMERA
+bool CameraNode::initStreamEncoder() {
+    // Create VENC encoder
+    lua_cv::VencEncoder::Config venc_config;
+    venc_config.codec = lua_cv::VencEncoder::CodecType::H264;
+    venc_config.width = config_.width;
+    venc_config.height = config_.height;
+    venc_config.fps = static_cast<uint32_t>(config_.fps);
+    venc_config.bitrate_kbps = config_.bitrate_kbps;
+    venc_config.gop = venc_config.fps;  // 1 second I-frame interval
+    venc_config.channel = static_cast<VENC_CHN>(config_.venc_channel);
+
+    stream_encoder_.encoder = std::make_unique<lua_cv::VencEncoder>(venc_config);
+    if (!stream_encoder_.encoder->init()) {
+        std::cerr << "[CameraNode] VENC encoder init failed" << std::endl;
+        return false;
+    }
+
+    // Bind VENC to VPSS stream channel
+    int vpss_grp = camera_->vpss_group();
+    int vpss_chn = camera_->vpss_stream_channel();
+    if (vpss_grp < 0 || vpss_chn < 0) {
+        std::cerr << "[CameraNode] Invalid VPSS binding for stream" << std::endl;
+        return false;
+    }
+
+    if (!stream_encoder_.encoder->bind_to_vpss(
+            static_cast<VPSS_GRP>(vpss_grp),
+            static_cast<VPSS_CHN>(vpss_chn))) {
+        std::cerr << "[CameraNode] Failed to bind VENC to VPSS" << std::endl;
+        return false;
+    }
+
+    std::cout << "[CameraNode] VENC bound to VPSS grp=" << vpss_grp
+              << " chn=" << vpss_chn << std::endl;
+
+    // Create WebSocket transport
+    lua_cv::WebSocketTransport::Config ws_config;
+    ws_config.port = config_.ws_port;
+    ws_config.max_clients = 8;
+
+    stream_encoder_.ws = std::make_unique<lua_cv::WebSocketTransport>(ws_config);
+
+    if (!stream_encoder_.ws->start()) {
+        std::cerr << "[CameraNode] WebSocket start failed" << std::endl;
+        return false;
+    }
+
+    std::cout << "[CameraNode] WebSocket started on port " << config_.ws_port << std::endl;
+
+    // Start encode thread
+    stream_encoder_.running.store(true, std::memory_order_release);
+    stream_encoder_.encode_thread = std::thread(&CameraNode::streamEncodeLoop, this);
+
+    return true;
+}
+
+void CameraNode::streamEncodeLoop() {
+    while (stream_encoder_.running.load(std::memory_order_acquire)) {
+        lua_cv::VencEncoder::EncodedStream stream;
+        if (!stream_encoder_.encoder->get_stream(&stream, 100)) {
+            continue;
+        }
+
+        // Broadcast to WebSocket clients
+        if (stream_encoder_.ws && stream_encoder_.ws->is_running()) {
+            stream_encoder_.ws->broadcast_binary(
+                stream.data.data(),
+                stream.data.size());
+        }
+
+        stream_encoder_.encoder->release_stream();
+    }
+}
+#endif
 } // namespace node
