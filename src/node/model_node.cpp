@@ -20,6 +20,8 @@
 #include <lualib.h>
 #include <lauxlib.h>
 
+#include <opencv2/opencv.hpp>
+
 #ifdef USE_CVI_TPU
 #include "inference/cvi_session.h"
 #endif
@@ -94,6 +96,81 @@ void fill_meta_json(const PreprocessMeta& meta, nlohmann::json* out) {
     (*out)["ori_h"] = meta.ori_h;
     (*out)["input_w"] = meta.input_w;
     (*out)["input_h"] = meta.input_h;
+}
+
+// Base64 encoding for WebSocket image transmission
+static const char* kBase64Chars =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    "abcdefghijklmnopqrstuvwxyz"
+    "0123456789+/";
+
+static std::string base64_encode(const unsigned char* data, size_t len) {
+    std::string ret;
+    int i = 0;
+    int j = 0;
+    unsigned char char_array_3[3];
+    unsigned char char_array_4[4];
+
+    while (len--) {
+        char_array_3[i++] = *(data++);
+        if (i == 3) {
+            char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
+            char_array_4[1] = ((char_array_3[0] & 0x03) << 4) + ((char_array_3[1] & 0xf0) >> 4);
+            char_array_4[2] = ((char_array_3[1] & 0x0f) << 2) + ((char_array_3[2] & 0xc0) >> 6);
+            char_array_4[3] = char_array_3[2] & 0x3f;
+
+            for (i = 0; i < 4; i++) {
+                ret += kBase64Chars[char_array_4[i]];
+            }
+            i = 0;
+        }
+    }
+
+    if (i > 0) {
+        for (j = i; j < 3; j++) {
+            char_array_3[j] = '\0';
+        }
+
+        char_array_4[0] = (char_array_3[0] & 0xfc) >> 2;
+        char_array_4[1] = ((char_array_3[0] & 0x03) << 4) + ((char_array_3[1] & 0xf0) >> 4);
+        char_array_4[2] = ((char_array_3[1] & 0x0f) << 2) + ((char_array_3[2] & 0xc0) >> 6);
+
+        for (j = 0; j < i + 1; j++) {
+            ret += kBase64Chars[char_array_4[j]];
+        }
+
+        while (i++ < 3) {
+            ret += '=';
+        }
+    }
+
+    return ret;
+}
+
+// Encode frame to base64 JPEG for WebSocket transmission
+static std::string encode_frame_to_base64_jpeg(const lua_cv::Frame& frame, int quality = 80) {
+    try {
+        cv::Mat mat = frame.to_mat_copy();
+        if (mat.empty()) {
+            return "";
+        }
+
+        // Convert to BGR if needed
+        if (mat.channels() == 1) {
+            cv::cvtColor(mat, mat, cv::COLOR_GRAY2BGR);
+        } else if (mat.channels() == 4) {
+            cv::cvtColor(mat, mat, cv::COLOR_BGRA2BGR);
+        }
+
+        std::vector<uint8_t> buffer;
+        std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, quality};
+        cv::imencode(".jpg", mat, buffer, params);
+
+        return base64_encode(buffer.data(), buffer.size());
+    } catch (const std::exception& e) {
+        std::cerr << "[ModelNode] Failed to encode frame: " << e.what() << std::endl;
+        return "";
+    }
 }
 
 void build_float_input(const cv::Mat& mat,
@@ -279,11 +356,15 @@ ModelNode::~ModelNode() {
 
 int ModelNode::onCreate(const nlohmann::json& config) {
     // 1. Parse configuration
-    if (!config.contains("model")) {
-        event("error", MA_EINVAL, {{"message", "Missing 'model' field"}});
-        return MA_EINVAL;
+    // Support both 'model' (internal) and 'uri' (Node-RED sscma-node) fields
+    if (config.contains("model")) {
+        model_path_ = config.at("model");
+    } else if (config.contains("uri")) {
+        model_path_ = config.at("uri");
+    } else {
+        // Default model path for Node-RED compatibility
+        model_path_ = "/usr/share/supervisor/models/yolo11n_detection_cv181x_int8.cvimodel";
     }
-    model_path_ = config.at("model");
 
 #ifdef USE_CVI_TPU
     {
@@ -295,14 +376,28 @@ int ModelNode::onCreate(const nlohmann::json& config) {
     }
 #endif
 
-    if (!config.contains("script")) {
-        event("error", MA_EINVAL, {{"message", "Missing 'script' field"}});
-        return MA_EINVAL;
+    // Support both 'script' (internal) and use default for Node-RED compatibility
+    if (config.contains("script")) {
+        script_path_ = config.at("script");
+    } else {
+        // Default script path for Node-RED compatibility
+        script_path_ = "/userdata/scripts/yolo11_tensor_detector.lua";
     }
-    script_path_ = config.at("script");
 
+    // Verify script file exists
+    {
+        struct stat st {};
+        if (stat(script_path_.c_str(), &st) != 0) {
+            last_error_ = "Script file not found: " + script_path_;
+            return MA_ENOENT;
+        }
+    }
+
+    // Support both 'threshold' (internal) and 'tscore' (Node-RED sscma-node) fields
     if (config.contains("threshold")) {
         conf_threshold_ = config["threshold"].get<float>();
+    } else if (config.contains("tscore")) {
+        conf_threshold_ = config["tscore"].get<float>();
     }
     if (config.contains("input_mode")) {
         std::string mode = config["input_mode"];
@@ -350,11 +445,22 @@ int ModelNode::onCreate(const nlohmann::json& config) {
     // 2. Set LUA_PATH from script directory if not already set
     const char* existing_lua_path = std::getenv("LUA_PATH");
     if (!existing_lua_path) {
-        // Extract directory from script path and set LUA_PATH
+        // Build LUA_PATH including both the script directory and its parent.
+        // Scripts often use require("scripts.lib.foo") which resolves relative to
+        // the parent of the scripts/ directory, so we must include parent_dir/?.lua.
         size_t last_slash = script_path_.find_last_of("/\\");
         if (last_slash != std::string::npos) {
             std::string script_dir = script_path_.substr(0, last_slash);
-            std::string lua_path = script_dir + "/?.lua;" + script_dir + "/?/init.lua;;";
+            std::string parent_dir;
+            size_t parent_slash = script_dir.find_last_of("/\\");
+            if (parent_slash != std::string::npos) {
+                parent_dir = script_dir.substr(0, parent_slash);
+            }
+            std::string lua_path;
+            if (!parent_dir.empty()) {
+                lua_path = parent_dir + "/?.lua;" + parent_dir + "/?/init.lua;";
+            }
+            lua_path += script_dir + "/?.lua;" + script_dir + "/?/init.lua;;";
             setenv("LUA_PATH", lua_path.c_str(), 1);
         }
     }
@@ -707,8 +813,19 @@ void ModelNode::inferLoop() {
                         {"data", event_data}
                     };
 
-                    if (!output_ && ws_msg["data"].is_object()) {
-                        ws_msg["data"]["image"] = "";
+                    // Add base64 encoded image when output is enabled
+                    if (output_ && ws_msg["data"].is_object()) {
+                        std::string base64_image = encode_frame_to_base64_jpeg(ctx->frame->frame());
+                        if (!base64_image.empty()) {
+                            ws_msg["data"]["image"] = base64_image;
+                        } else {
+                            ws_msg["data"]["image"] = "";
+                        }
+                    } else {
+                        // Clear image field when output is disabled
+                        if (ws_msg["data"].is_object()) {
+                            ws_msg["data"]["image"] = "";
+                        }
                     }
 
                     std::string payload = ws_msg.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
