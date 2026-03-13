@@ -56,12 +56,16 @@ public:
     void response(const std::string& name, int code, const nlohmann::json& data);
     void event(const std::string& name, int code, const nlohmann::json& data);
 
+    // Error information (for node_factory to retrieve)
+    const std::string& lastError() const { return last_error_; }
+
 protected:
     std::string id_;
     std::string type_;
     std::atomic<bool> created_{false};
     std::atomic<bool> started_{false};
     std::atomic<bool> enabled_{true};
+    std::string last_error_;  // Last error message from onCreate/onStart
 
     std::map<std::string, Node*> dependencies_;
     std::map<std::string, Node*> dependents_;
