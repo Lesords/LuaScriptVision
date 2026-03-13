@@ -228,6 +228,12 @@ cv::Mat Frame::to_mat_copy() const {
             cv::merge(channels, bgr);
             return bgr;
         }
+        if (format_ == PixelFormat::RGB) {
+            // Convert interleaved RGB to BGR (OpenCV expects BGR)
+            cv::Mat bgr;
+            cv::cvtColor(mapped_view_, bgr, cv::COLOR_RGB2BGR);
+            return bgr;
+        }
         return mapped_view_.clone();
     }
 #endif
