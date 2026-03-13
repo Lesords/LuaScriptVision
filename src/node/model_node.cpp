@@ -289,7 +289,7 @@ int ModelNode::onCreate(const nlohmann::json& config) {
     {
         struct stat st {};
         if (stat(model_path_.c_str(), &st) != 0) {
-            event("error", MA_ENOENT, {{"message", "Model file not found: " + model_path_}});
+            last_error_ = "Model file not found: " + model_path_;
             return MA_ENOENT;
         }
     }
@@ -362,7 +362,7 @@ int ModelNode::onCreate(const nlohmann::json& config) {
     // 3. Create independent Lua State
     L_ = luaL_newstate();
     if (!L_) {
-        event("error", MA_ENOMEM, {{"message", "Failed to create Lua state"}});
+        last_error_ = "Failed to create Lua state";
         return MA_ENOMEM;
     }
     luaL_openlibs(L_);
@@ -375,7 +375,7 @@ int ModelNode::onCreate(const nlohmann::json& config) {
     // 3. Load Lua script
     if (luaL_dofile(L_, script_path_.c_str()) != LUA_OK) {
         std::string err = lua_tostring(L_, -1);
-        event("error", MA_EINVAL, {{"message", "Lua script error: " + err}});
+        last_error_ = "Lua script error: " + err;
         lua_close(L_);
         L_ = nullptr;
         return MA_EINVAL;
@@ -389,7 +389,7 @@ int ModelNode::onCreate(const nlohmann::json& config) {
         return code;
     };
     if (!model.isTable()) {
-        event("error", MA_EINVAL, {{"message", "Script must return a table"}});
+        last_error_ = "Script must return a table";
         return cleanup_with_model(MA_EINVAL);
     }
 
@@ -398,7 +398,7 @@ int ModelNode::onCreate(const nlohmann::json& config) {
     preprocess_config_ref_ = model["preprocess_config"];
 
     if (!postprocess_.isFunction()) {
-        event("error", MA_EINVAL, {{"message", "Missing postprocess function"}});
+        last_error_ = "Missing postprocess function in script";
         return cleanup_with_model(MA_EINVAL);
     }
 
@@ -444,18 +444,14 @@ int ModelNode::onCreate(const nlohmann::json& config) {
             }
         }
     } catch (const std::exception& e) {
-        event("error", MA_EIO, {
-            {"message", "Model load failed"},
-            {"path", model_path_},
-            {"detail", e.what()}
-        });
+        last_error_ = "Model load failed: " + std::string(e.what());
         return cleanup_with_model(MA_EIO);
     }
 #else
     // CPU-only build: validate file exists
     FILE* f = fopen(model_path_.c_str(), "r");
     if (!f) {
-        event("error", MA_ENOENT, {{"message", "Model file not found: " + model_path_}});
+        last_error_ = "Model file not found: " + model_path_;
         cleanupLuaRef();
         return MA_ENOENT;
     }
@@ -473,15 +469,11 @@ int ModelNode::onCreate(const nlohmann::json& config) {
             }
         }
         if (!has_model_upstream) {
-            event("error", MA_EINVAL, {
-                {"message", "CROPPED_ROI mode requires upstream ModelNode"}
-            });
+            last_error_ = "CROPPED_ROI mode requires upstream ModelNode";
             return cleanup_with_model(MA_EINVAL);
         }
         if (!select_rois_.isFunction()) {
-            event("error", MA_EINVAL, {
-                {"message", "CROPPED_ROI mode requires select_rois(upstream) in script"}
-            });
+            last_error_ = "CROPPED_ROI mode requires select_rois(upstream) in script";
             return cleanup_with_model(MA_EINVAL);
         }
     }
@@ -505,7 +497,7 @@ int ModelNode::onStart() {
 #ifdef USE_CVI_TPU
     // Verify session was created in onCreate
     if (!session_) {
-        event("error", MA_EINVAL, {{"message", "CviSession not initialized"}});
+        last_error_ = "CviSession not initialized";
         return MA_EINVAL;
     }
 #endif
@@ -542,7 +534,7 @@ int ModelNode::onStart() {
         ws_cfg.max_clients = ws_max_clients_;
         ws_ = std::make_unique<lua_cv::WebSocketTransport>(ws_cfg);
         if (!ws_->start()) {
-            event("error", MA_EIO, {{"message", "ModelNode WebSocket start failed"}});
+            last_error_ = "ModelNode WebSocket start failed";
             ws_.reset();
             running_.store(false, std::memory_order_release);
             ResourceEstimator::instance().on_node_stopped(id_);
@@ -556,6 +548,9 @@ int ModelNode::onStart() {
     }
 
     infer_thread_ = std::thread(&ModelNode::inferLoop, this);
+
+    // Send enabled event to notify frontend of initial state
+    event("enabled", MA_OK, infer_enabled_.load(std::memory_order_acquire));
 
     return MA_OK;
 }
@@ -581,6 +576,9 @@ int ModelNode::onStop() {
 
     // Unregister resource usage
     ResourceEstimator::instance().on_node_stopped(id_);
+
+    // Send enabled event to notify frontend of stopped state
+    event("enabled", MA_OK, false);
 
     return MA_OK;
 }
@@ -622,6 +620,21 @@ int ModelNode::onControl(const std::string& action, const nlohmann::json& data) 
         return MA_OK;
     }
 
+    if (action == "enabled") {
+        // Support both formats: {"value": bool} or direct boolean
+        bool enabled;
+        if (data.is_boolean()) {
+            enabled = data.get<bool>();
+        } else if (data.contains("value")) {
+            enabled = data["value"].get<bool>();
+        } else {
+            enabled = true;  // Default to true
+        }
+        infer_enabled_.store(enabled, std::memory_order_release);
+        event("enabled", MA_OK, enabled);  // Send direct boolean for frontend
+        return MA_OK;
+    }
+
     return MA_EINVAL;
 }
 
@@ -630,6 +643,12 @@ void ModelNode::inferLoop() {
         PipelineContext* ctx;
         if (!inbox_.fetch(&ctx, 100)) {
             // Timeout or interrupted
+            continue;
+        }
+
+        // When disabled, drain inbox without processing
+        if (!infer_enabled_.load(std::memory_order_acquire)) {
+            delete ctx;
             continue;
         }
 
@@ -708,11 +727,8 @@ void ModelNode::inferLoop() {
 
         } catch (const std::exception& e) {
             error_count_.fetch_add(1, std::memory_order_relaxed);
-            event("error", MA_EIO, {
-                {"message", "Inference failed"},
-                {"detail", e.what()},
-                {"frame_id", ctx->frame_id}
-            });
+            std::string error_msg = "Inference failed: " + std::string(e.what());
+            event("error", MA_EIO, error_msg);
         }
 
         // Clean up: delete ctx (destructor calls frame->release())
@@ -1341,17 +1357,13 @@ nlohmann::json ModelNode::callPostprocess(
         return json_result;
 
     } catch (const LuaIntf::LuaException& e) {
-        event("error", MA_EINVAL, {
-            {"message", "Postprocess Lua error"},
-            {"detail", e.what()}
-        });
+        std::string error_msg = "Postprocess Lua error: " + std::string(e.what());
+        event("error", MA_EINVAL, error_msg);
         return nlohmann::json::object();
 
     } catch (const std::exception& e) {
-        event("error", MA_EINVAL, {
-            {"message", "Postprocess error"},
-            {"detail", e.what()}
-        });
+        std::string error_msg = "Postprocess error: " + std::string(e.what());
+        event("error", MA_EINVAL, error_msg);
         return nlohmann::json::object();
     }
 }

@@ -89,6 +89,7 @@ private:
     // Inference thread
     std::thread infer_thread_;
     std::atomic<bool> running_{false};
+    std::atomic<bool> infer_enabled_{true};  // Inference enable/disable control
     std::unique_ptr<lua_cv::WebSocketTransport> ws_;
 
     // Upstream camera reference (for timing feedback)
