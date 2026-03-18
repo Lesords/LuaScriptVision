@@ -185,7 +185,13 @@ add_executable(test_model_node
     src/node/node_server.cpp
     src/node/camera_node.cpp
     src/node/model_node.cpp
+    src/node/lua_model_postprocess.cpp
+    src/node/lua_roi_selector.cpp
+    src/node/luaref_json_bridge.cpp
+    src/node/model_event_payload.cpp
+    src/node/model_inference_meta.cpp
     src/node/model_preprocess_utils.cpp
+    src/node/model_profile_payload.cpp
     src/node/model_roi_utils.cpp
     src/node/executor.cpp
     src/node/resource_estimator.cpp

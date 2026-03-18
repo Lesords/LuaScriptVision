@@ -23,6 +23,7 @@ namespace lua_cv { class WebSocketTransport; }
 namespace node {
 
 class CameraNode;
+struct RoiBatchMetrics;
 
 // ModelNode: TPU inference with Lua postprocessing
 class ModelNode : public DataNode {
@@ -48,36 +49,6 @@ public:
     double infer_ema_ms() const { return infer_ema_ms_; }
 
 private:
-    struct InferenceTimings {
-        double preprocess_ms = 0.0;
-        double vpss_ms = 0.0;
-        double cpu_pre_ms = 0.0;
-        double build_input_ms = 0.0;
-        double infer_ms = 0.0;
-        double postprocess_ms = 0.0;
-        double tpu_input_ms = 0.0;
-        double tpu_forward_ms = 0.0;
-        double tpu_output_ms = 0.0;
-        bool vpss_attempted = false;
-        bool use_vb = false;
-        std::string preprocess_path = "cpu";
-    };
-
-    struct RoiBatchMetrics {
-        double preprocess_total_ms = 0.0;
-        double vpss_total_ms = 0.0;
-        double cpu_pre_total_ms = 0.0;
-        double build_input_total_ms = 0.0;
-        double infer_total_ms = 0.0;
-        double postprocess_total_ms = 0.0;
-        double tpu_input_total_ms = 0.0;
-        double tpu_forward_total_ms = 0.0;
-        double tpu_output_total_ms = 0.0;
-        int roi_count = 0;
-        int use_vb_count = 0;
-        int vpss_attempted_count = 0;
-    };
-
     int parseConfig(const nlohmann::json& config);
     void parsePreviewConfig(const nlohmann::json& config);
     void configureLuaPathFromScript() const;
@@ -88,30 +59,14 @@ private:
     void bindUpstreamCamera();
 
     void inferLoop();
-    nlohmann::json buildEventData(nlohmann::json result,
-                                  const PipelineContext& ctx,
-                                  double latency_ms) const;
     void maybeBroadcastPreview(const PipelineContext& ctx, const nlohmann::json& event_data);
     nlohmann::json runInference(const lua_cv::Frame& frame, const nlohmann::json& upstream);
     nlohmann::json runFullFrameInference(const lua_cv::Frame& frame, const nlohmann::json& upstream);
     nlohmann::json runCroppedRoiInference(const lua_cv::Frame& frame, const nlohmann::json& upstream);
-    nlohmann::json buildFullFrameMeta(const lua_cv::Frame& frame,
-                                      const nlohmann::json& upstream,
-                                      const PreprocessMeta& preprocess_meta) const;
-    void emitFullFrameProfile(const InferenceTimings& timings,
-                              const PreprocessMeta& preprocess_meta,
-                              const std::chrono::steady_clock::time_point& total_start,
-                              const std::chrono::steady_clock::time_point& total_end);
-    std::vector<Roi> selectValidRois(const lua_cv::Frame& frame, const nlohmann::json& upstream);
-    nlohmann::json buildRoiMeta(const Roi& roi,
-                                const nlohmann::json& upstream,
-                                const PreprocessMeta& preprocess_meta) const;
     nlohmann::json runSingleRoiInference(const lua_cv::Frame& frame,
                                          const Roi& roi,
                                          const nlohmann::json& upstream,
                                          RoiBatchMetrics* metrics);
-    void emitCroppedRoiProfile(const RoiBatchMetrics& metrics,
-                               const std::chrono::steady_clock::time_point& total_start);
     nlohmann::json callPostprocess(
         std::vector<std::vector<float>> outputs,
         std::vector<std::vector<int64_t>> output_shapes,

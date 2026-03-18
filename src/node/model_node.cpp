@@ -2,21 +2,23 @@
 #include "node_factory.h"
 #include "node_server.h"
 #include "camera_node.h"
+#include "lua_model_postprocess.h"
+#include "lua_roi_selector.h"
+#include "luaref_json_bridge.h"
+#include "model_event_payload.h"
+#include "model_inference_meta.h"
+#include "model_node_utils.h"
+#include "model_profile_payload.h"
 #include "resource_estimator.h"
-#include "model_roi_utils.h"
 #include "stream/websocket_transport.h"
 #include "stream/model_preview_formatter.h"
 #include "modules/cv/cv_helpers.h"
 #include "modules/cv/cv_types.h"
 #include "tensor/tensor.h"
 
-#include <chrono>
 #include <cmath>
-#include <algorithm>
-#include <cctype>
 #include <cstdlib>
 #include <iostream>
-#include <sys/stat.h>
 
 #include <lua.h>
 #include <lualib.h>
@@ -40,78 +42,6 @@ namespace lua_utils { void register_module(lua_State* L); }
 namespace node {
 
 namespace {
-double elapsed_ms(const std::chrono::steady_clock::time_point& start,
-                  const std::chrono::steady_clock::time_point& end) {
-    return std::chrono::duration<double, std::milli>(end - start).count();
-}
-
-std::string to_lower(std::string value) {
-    std::transform(value.begin(), value.end(), value.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return value;
-}
-
-void push_json(lua_State* L, const nlohmann::json& value) {
-    if (value.is_null()) {
-        lua_pushnil(L);
-    } else if (value.is_boolean()) {
-        lua_pushboolean(L, value.get<bool>());
-    } else if (value.is_number_integer()) {
-        lua_pushinteger(L, static_cast<lua_Integer>(value.get<int64_t>()));
-    } else if (value.is_number_unsigned()) {
-        lua_pushinteger(L, static_cast<lua_Integer>(value.get<uint64_t>()));
-    } else if (value.is_number_float()) {
-        lua_pushnumber(L, static_cast<lua_Number>(value.get<double>()));
-    } else if (value.is_string()) {
-        lua_pushstring(L, value.get<std::string>().c_str());
-    } else if (value.is_array()) {
-        lua_newtable(L);
-        int index = 1;
-        for (const auto& item : value) {
-            push_json(L, item);
-            lua_rawseti(L, -2, index++);
-        }
-    } else if (value.is_object()) {
-        lua_newtable(L);
-        for (auto it = value.begin(); it != value.end(); ++it) {
-            lua_pushstring(L, it.key().c_str());
-            push_json(L, it.value());
-            lua_settable(L, -3);
-        }
-    } else {
-        lua_pushnil(L);
-    }
-}
-
-LuaIntf::LuaRef json_to_luaref(lua_State* L, const nlohmann::json& value) {
-    push_json(L, value);
-    return LuaIntf::LuaRef::popFromStack(L);
-}
-
-bool file_exists(const std::string& path) {
-    struct stat st {};
-    return stat(path.c_str(), &st) == 0;
-}
-
-bool parse_preview_resolution(const std::string& resolution, int* width, int* height) {
-    if (!width || !height) {
-        return false;
-    }
-
-    size_t sep_pos = resolution.find_first_of("xX");
-    if (sep_pos == std::string::npos || sep_pos == 0 || sep_pos >= resolution.length() - 1) {
-        return false;
-    }
-
-    try {
-        *width = std::stoi(resolution.substr(0, sep_pos));
-        *height = std::stoi(resolution.substr(sep_pos + 1));
-    } catch (const std::exception&) {
-        return false;
-    }
-
-    return *width > 0 && *height > 0;
-}
 }  // namespace
 
 // Register ModelNode type
@@ -574,29 +504,6 @@ int ModelNode::onControl(const std::string& action, const nlohmann::json& data) 
     return MA_EINVAL;
 }
 
-nlohmann::json ModelNode::buildEventData(nlohmann::json result,
-                                         const PipelineContext& ctx,
-                                         double latency_ms) const {
-    nlohmann::json event_data;
-    if (result.is_object()) {
-        event_data = std::move(result);
-    } else if (result.is_array()) {
-        event_data = nlohmann::json::object({{"boxes", std::move(result)}});
-    } else {
-        event_data = nlohmann::json::object({{"value", std::move(result)}});
-    }
-
-    event_data["latency_ms"] = latency_ms;
-    event_data["frame_id"] = ctx.frame_id;
-    if (!event_data.contains("frame_width")) {
-        event_data["frame_width"] = ctx.frame->frame().width();
-    }
-    if (!event_data.contains("frame_height")) {
-        event_data["frame_height"] = ctx.frame->frame().height();
-    }
-    return event_data;
-}
-
 void ModelNode::maybeBroadcastPreview(const PipelineContext& ctx, const nlohmann::json& event_data) {
     if (!config_.websocket || !ws_) {
         return;
@@ -666,7 +573,12 @@ void ModelNode::inferLoop() {
                 upstream_camera_->report_proc_time(id_, elapsed_ms);
             }
 
-            nlohmann::json event_data = buildEventData(std::move(result), *ctx, elapsed_ms);
+            nlohmann::json event_data = build_inference_event_data(
+                std::move(result),
+                ctx->frame_id,
+                ctx->frame->frame().width(),
+                ctx->frame->frame().height());
+            event_data["latency_ms"] = elapsed_ms;
 
             event("invoke", MA_OK, event_data);
             maybeBroadcastPreview(*ctx, event_data);
@@ -683,123 +595,6 @@ void ModelNode::inferLoop() {
         // Clean up: delete ctx (destructor calls frame->release())
         delete ctx;
     }
-}
-
-nlohmann::json ModelNode::buildFullFrameMeta(const lua_cv::Frame& frame,
-                                             const nlohmann::json& upstream,
-                                             const PreprocessMeta& preprocess_meta) const {
-    int meta_frame_w = frame.width();
-    int meta_frame_h = frame.height();
-    if (upstream_camera_) {
-        meta_frame_w = upstream_camera_->config_width();
-        meta_frame_h = upstream_camera_->config_height();
-    }
-
-    nlohmann::json meta = {
-        {"upstream", upstream},
-        {"threshold", config_.conf_threshold},
-        {"frame_width", meta_frame_w},
-        {"frame_height", meta_frame_h},
-        {"output_count", session_ ? session_->output_count() : 1}
-    };
-    fill_meta_json(preprocess_meta, &meta);
-    return meta;
-}
-
-void ModelNode::emitFullFrameProfile(const InferenceTimings& timings,
-                                     const PreprocessMeta& preprocess_meta,
-                                     const std::chrono::steady_clock::time_point& total_start,
-                                     const std::chrono::steady_clock::time_point& total_end) {
-    if (!config_.profile) {
-        return;
-    }
-
-    nlohmann::json profile = {
-        {"mode", "full_frame"},
-        {"preprocess_ms", timings.preprocess_ms},
-        {"preprocess_vpss_ms", timings.vpss_ms},
-        {"preprocess_cpu_ms", timings.cpu_pre_ms},
-        {"build_input_ms", timings.build_input_ms},
-        {"infer_ms", timings.infer_ms},
-        {"postprocess_ms", timings.postprocess_ms},
-        {"tpu_input_ms", timings.tpu_input_ms},
-        {"tpu_forward_ms", timings.tpu_forward_ms},
-        {"tpu_output_ms", timings.tpu_output_ms},
-        {"preprocess_path", timings.preprocess_path},
-        {"vpss_attempted", timings.vpss_attempted},
-        {"use_vb", timings.use_vb},
-        {"zero_copy", timings.use_vb},
-        {"input_w", preprocess_meta.input_w},
-        {"input_h", preprocess_meta.input_h}
-    };
-    profile["total_ms"] = elapsed_ms(total_start, total_end);
-    emitProfile(profile);
-}
-
-std::vector<Roi> ModelNode::selectValidRois(const lua_cv::Frame& frame, const nlohmann::json& upstream) {
-    if (!select_rois_.isFunction()) {
-        return {};
-    }
-
-    LuaIntf::LuaRef upstream_ref = json_to_luaref(L_, upstream);
-    LuaIntf::LuaRef rois_ref = select_rois_.call<LuaIntf::LuaRef>(upstream_ref);
-    nlohmann::json rois_json = luaref_to_json(rois_ref);
-    if (!rois_json.is_array() || rois_json.empty()) {
-        return {};
-    }
-
-    std::vector<Roi> rois;
-    rois.reserve(rois_json.size());
-    for (const auto& roi_item : rois_json) {
-        Roi roi;
-        if (!parse_roi(roi_item, &roi)) {
-            continue;
-        }
-        if (clamp_roi_to_bounds(frame.width(), frame.height(), &roi)) {
-            rois.push_back(roi);
-        }
-    }
-    return rois;
-}
-
-nlohmann::json ModelNode::buildRoiMeta(const Roi& roi,
-                                       const nlohmann::json& upstream,
-                                       const PreprocessMeta& preprocess_meta) const {
-    nlohmann::json meta = {
-        {"roi", {{"x", roi.x}, {"y", roi.y}, {"w", roi.w}, {"h", roi.h}}},
-        {"upstream", upstream},
-        {"threshold", config_.conf_threshold}
-    };
-    fill_meta_json(preprocess_meta, &meta);
-    return meta;
-}
-
-void ModelNode::emitCroppedRoiProfile(const RoiBatchMetrics& metrics,
-                                      const std::chrono::steady_clock::time_point& total_start) {
-    if (!config_.profile || metrics.roi_count <= 0) {
-        return;
-    }
-
-    nlohmann::json profile = {
-        {"mode", "cropped_roi"},
-        {"roi_count", metrics.roi_count},
-        {"preprocess_ms", metrics.preprocess_total_ms},
-        {"preprocess_vpss_ms", metrics.vpss_total_ms},
-        {"preprocess_cpu_ms", metrics.cpu_pre_total_ms},
-        {"build_input_ms", metrics.build_input_total_ms},
-        {"infer_ms", metrics.infer_total_ms},
-        {"postprocess_ms", metrics.postprocess_total_ms},
-        {"tpu_input_ms", metrics.tpu_input_total_ms},
-        {"tpu_forward_ms", metrics.tpu_forward_total_ms},
-        {"tpu_output_ms", metrics.tpu_output_total_ms},
-        {"use_vb_count", metrics.use_vb_count},
-        {"vpss_attempted_count", metrics.vpss_attempted_count}
-    };
-    profile["total_ms"] = elapsed_ms(total_start, std::chrono::steady_clock::now());
-    profile["avg_preprocess_ms"] = metrics.preprocess_total_ms / metrics.roi_count;
-    profile["avg_infer_ms"] = metrics.infer_total_ms / metrics.roi_count;
-    profile["avg_postprocess_ms"] = metrics.postprocess_total_ms / metrics.roi_count;
-    emitProfile(profile);
 }
 
 nlohmann::json ModelNode::runInference(const lua_cv::Frame& frame,
@@ -1010,20 +805,36 @@ nlohmann::json ModelNode::runFullFrameInference(const lua_cv::Frame& frame,
     (void)frame;
 #endif
 
-    nlohmann::json meta = buildFullFrameMeta(frame, upstream, preprocess_meta);
+    int meta_frame_w = frame.width();
+    int meta_frame_h = frame.height();
+    if (upstream_camera_) {
+        meta_frame_w = upstream_camera_->config_width();
+        meta_frame_h = upstream_camera_->config_height();
+    }
+    nlohmann::json meta = build_full_frame_meta(
+        upstream,
+        config_.conf_threshold,
+        meta_frame_w,
+        meta_frame_h,
+        session_ ? session_->output_count() : 1,
+        preprocess_meta);
 
     auto t_post_start = std::chrono::steady_clock::now();
     nlohmann::json result = callPostprocess(std::move(outputs), std::move(output_shapes), meta);
     auto t_post_end = std::chrono::steady_clock::now();
     timings.postprocess_ms = elapsed_ms(t_post_start, t_post_end);
-    emitFullFrameProfile(timings, preprocess_meta, t_total_start, t_post_end);
+    if (config_.profile) {
+        emitProfile(build_full_frame_profile_payload(
+            timings, preprocess_meta, elapsed_ms(t_total_start, t_post_end)));
+    }
 
     return result;
 }
 
 nlohmann::json ModelNode::runCroppedRoiInference(const lua_cv::Frame& frame,
                                                   const nlohmann::json& upstream) {
-    std::vector<Roi> rois = selectValidRois(frame, upstream);
+    std::vector<Roi> rois = select_valid_rois(
+        L_, select_rois_, frame.width(), frame.height(), upstream);
     if (rois.empty()) {
         return {{"items", nlohmann::json::array()}};
     }
@@ -1038,7 +849,10 @@ nlohmann::json ModelNode::runCroppedRoiInference(const lua_cv::Frame& frame,
         }
     }
 
-    emitCroppedRoiProfile(metrics, t_total_start);
+    if (config_.profile && metrics.roi_count > 0) {
+        emitProfile(build_cropped_roi_profile_payload(
+            metrics, elapsed_ms(t_total_start, std::chrono::steady_clock::now())));
+    }
     return {{"items", items}};
 }
 
@@ -1259,7 +1073,7 @@ nlohmann::json ModelNode::runSingleRoiInference(const lua_cv::Frame& frame,
     (void)frame;
 #endif
 
-    nlohmann::json meta = buildRoiMeta(roi, upstream, preprocess_meta);
+    nlohmann::json meta = build_roi_meta(roi, upstream, config_.conf_threshold, preprocess_meta);
     auto t_post_start = std::chrono::steady_clock::now();
     auto item = callPostprocess(std::move(outputs), std::move(output_shapes), meta);
     auto t_post_end = std::chrono::steady_clock::now();
@@ -1280,63 +1094,22 @@ nlohmann::json ModelNode::callPostprocess(
     std::vector<std::vector<float>> outputs,
     std::vector<std::vector<int64_t>> output_shapes,
     const nlohmann::json& meta) {
-    try {
-        if (outputs.size() != output_shapes.size()) {
-            event("warning", 0, {
-                {"message", "Output count mismatch"},
-                {"outputs", outputs.size()},
-                {"shapes", output_shapes.size()}
-            });
-        }
-
-        LuaIntf::LuaRef outputs_ref = LuaIntf::LuaRef::createTable(L_);
-        const std::vector<std::string>* output_names = nullptr;
+    const std::vector<std::string>* output_names = nullptr;
 #ifdef USE_CVI_TPU
-        if (session_) {
-            output_names = &session_->get_output_names();
-        }
+    if (session_) {
+        output_names = &session_->get_output_names();
+    }
 #endif
 
-        size_t count = std::min(outputs.size(), output_shapes.size());
-        for (size_t i = 0; i < count; ++i) {
-            tensor::Tensor tensor(std::move(outputs[i]), output_shapes[i]);
-            std::string default_name = "output" + std::to_string(i);
-            outputs_ref[default_name] = tensor;
-            if (output_names && i < output_names->size()) {
-                const std::string& name = (*output_names)[i];
-                if (!name.empty() && name != default_name) {
-                    outputs_ref[name] = tensor;
-                }
-            }
-        }
-
-        LuaIntf::LuaRef meta_ref = json_to_luaref(L_, meta);
-
-        // Call postprocess(outputs, meta)
-        LuaIntf::LuaRef result = postprocess_.call<LuaIntf::LuaRef>(outputs_ref, meta_ref);
-        nlohmann::json json_result = luaref_to_json(result);
-
-        // Clear LuaRef to prevent memory leak
-        result = LuaIntf::LuaRef();
-        outputs_ref = LuaIntf::LuaRef();
-        meta_ref = LuaIntf::LuaRef();
-        // Keep GC moving; large tensor outputs can otherwise accumulate.
-        if (L_) {
-            lua_gc(L_, LUA_GCSTEP, 200);
-        }
-
-        return json_result;
-
-    } catch (const LuaIntf::LuaException& e) {
-        std::string error_msg = "Postprocess Lua error: " + std::string(e.what());
-        event("error", MA_EINVAL, error_msg);
-        return nlohmann::json::object();
-
-    } catch (const std::exception& e) {
-        std::string error_msg = "Postprocess error: " + std::string(e.what());
-        event("error", MA_EINVAL, error_msg);
-        return nlohmann::json::object();
+    LuaModelPostprocessResult result = call_lua_model_postprocess(
+        L_, postprocess_, output_names, std::move(outputs), std::move(output_shapes), meta);
+    if (result.has_warning) {
+        event("warning", 0, result.warning_payload);
     }
+    if (result.has_error) {
+        event("error", MA_EINVAL, result.error_message);
+    }
+    return std::move(result.value);
 }
 
 void ModelNode::forwardToDownstream(PipelineContext* ctx, const nlohmann::json& result) {
