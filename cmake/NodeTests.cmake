@@ -185,6 +185,8 @@ add_executable(test_model_node
     src/node/node_server.cpp
     src/node/camera_node.cpp
     src/node/model_node.cpp
+    src/node/model_preprocess_utils.cpp
+    src/node/model_roi_utils.cpp
     src/node/executor.cpp
     src/node/resource_estimator.cpp
     ${TENSOR_SOURCES}
