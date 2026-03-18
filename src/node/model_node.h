@@ -51,9 +51,6 @@ public:
 private:
     int parseConfig(const nlohmann::json& config);
     void parsePreviewConfig(const nlohmann::json& config);
-    void configureLuaPathFromScript() const;
-    int initializeLuaRuntime();
-    int loadLuaModelBindings();
     int initializeSession();
     int validateInputModeDependencies();
     void bindUpstreamCamera();

@@ -185,6 +185,8 @@ add_executable(test_model_node
     src/node/node_server.cpp
     src/node/camera_node.cpp
     src/node/model_node.cpp
+    src/node/model_inference_executor.cpp
+    src/node/model_lua_runtime.cpp
     src/node/lua_model_postprocess.cpp
     src/node/lua_roi_selector.cpp
     src/node/luaref_json_bridge.cpp

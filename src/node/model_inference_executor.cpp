@@ -1,0 +1,431 @@
+#include "model_inference_executor.h"
+
+#include "model_node_utils.h"
+
+#include "modules/cv/frame.h"
+
+#ifdef USE_CVI_TPU
+#include "inference/cvi_session.h"
+#endif
+
+#ifdef USE_CVI_MPI
+#include "modules/cv/cv_helpers.h"
+#include "modules/cv/cv_types.h"
+#include "modules/cv/cvi_vpss_processor.h"
+#endif
+
+#include <chrono>
+#include <cmath>
+#include <opencv2/opencv.hpp>
+#include <stdexcept>
+
+namespace node {
+namespace {
+
+void fill_resize_meta(int source_w,
+                      int source_h,
+                      int target_w,
+                      int target_h,
+                      PreprocessMeta* meta) {
+    meta->scale = static_cast<float>(target_w) /
+                  static_cast<float>(std::max(1, source_w));
+    meta->pad_x = 0;
+    meta->pad_y = 0;
+    meta->ori_w = source_w;
+    meta->ori_h = source_h;
+    meta->input_w = target_w;
+    meta->input_h = target_h;
+}
+
+#ifdef USE_CVI_TPU
+void copy_run_stats(const inference::CviSession::RunStats& stats,
+                    double* input_ms,
+                    double* forward_ms,
+                    double* output_ms) {
+    *input_ms = stats.input_ms;
+    *forward_ms = stats.forward_ms;
+    *output_ms = stats.output_ms;
+}
+#endif
+
+}  // namespace
+
+FullFrameExecutionResult execute_full_frame_inference(const lua_cv::Frame& frame,
+                                                      const ModelExecutorConfig& config) {
+    FullFrameExecutionResult result;
+    const PreprocessConfig& preprocess = *config.preprocess_config;
+    auto t_pre_start = std::chrono::steady_clock::now();
+
+    int target_w = preprocess.input_width > 0 ? preprocess.input_width : frame.width();
+    int target_h = preprocess.input_height > 0 ? preprocess.input_height : frame.height();
+
+    result.preprocess_meta.ori_w = frame.width();
+    result.preprocess_meta.ori_h = frame.height();
+    result.preprocess_meta.input_w = target_w;
+    result.preprocess_meta.input_h = target_h;
+
+#ifdef USE_CVI_TPU
+    if (!config.session) {
+        throw std::runtime_error("CviSession not initialized");
+    }
+
+    bool use_vb = false;
+    lua_cv::Frame preprocessed;
+    std::string preprocess_type = to_lower(preprocess.type);
+
+#ifdef USE_CVI_MPI
+    if (config.session->supports_vb_input() &&
+        frame.storage_type() == lua_cv::Frame::StorageType::CVI) {
+        auto spec = config.session->get_vb_input_spec();
+        lua_cv::PixelFormat out_pf = lua_cv::from_cvi_pixel_format(spec.pixel_format);
+        target_w = static_cast<int>(spec.width);
+        target_h = static_cast<int>(spec.height);
+        result.preprocess_meta.input_w = target_w;
+        result.preprocess_meta.input_h = target_h;
+
+        try {
+            result.timings.vpss_attempted = true;
+            auto t_vpss_start = std::chrono::steady_clock::now();
+            lua_cv::Frame work;
+            if (frame.video_frame()) {
+                work = lua_cv::Frame(*frame.video_frame(), false);
+            } else {
+                work = frame.clone();
+            }
+
+            lua_cv::CviVpssProcessor vpss;
+            if (preprocess_type == "letterbox") {
+                result.preprocess_meta = compute_letterbox_meta(frame.width(), frame.height(),
+                                                                target_w, target_h,
+                                                                preprocess.center);
+                vpss.letterbox(work, target_w, target_h,
+                               static_cast<uint8_t>(preprocess.fill_value),
+                               nullptr, out_pf);
+            } else if (preprocess_type == "resize" || preprocess_type == "none") {
+                if (frame.width() != target_w || frame.height() != target_h ||
+                    preprocess_type == "resize") {
+                    vpss.resize(work, target_w, target_h);
+                }
+                fill_resize_meta(frame.width(), frame.height(), target_w, target_h,
+                                 &result.preprocess_meta);
+                if (work.pixel_format() != out_pf) {
+                    vpss.convert_format(work, out_pf);
+                }
+            } else {
+                throw std::runtime_error("Unsupported preprocess type: " + preprocess.type);
+            }
+
+            preprocessed = std::move(work);
+            std::string reason;
+            if (lua_cv::cv_helpers::can_zero_copy(
+                    preprocessed,
+                    spec.pixel_format,
+                    spec.width,
+                    spec.height,
+                    &reason)) {
+                use_vb = true;
+            }
+            result.timings.preprocess_path = use_vb ? "vpss_vb" : "vpss_copy";
+            result.timings.vpss_ms = elapsed_ms(t_vpss_start, std::chrono::steady_clock::now());
+        } catch (const std::exception& e) {
+            result.warning = ExecutionWarning{"VPSS preprocess failed", e.what()};
+            preprocessed = lua_cv::Frame();
+        }
+    }
+#endif
+
+    if (use_vb) {
+#ifdef USE_CVI_MPI
+        auto vb_mem = preprocessed.as_vb_memory();
+        if (!vb_mem) {
+            throw std::runtime_error("Failed to get VB memory from frame");
+        }
+        auto t_pre_end = std::chrono::steady_clock::now();
+        result.timings.preprocess_ms = elapsed_ms(t_pre_start, t_pre_end);
+        auto t_infer_start = std::chrono::steady_clock::now();
+        config.session->run_vb(vb_mem, &result.outputs, &result.output_shapes);
+        auto t_infer_end = std::chrono::steady_clock::now();
+        result.timings.infer_ms = elapsed_ms(t_infer_start, t_infer_end);
+        copy_run_stats(config.session->last_run_stats(),
+                       &result.timings.tpu_input_ms,
+                       &result.timings.tpu_forward_ms,
+                       &result.timings.tpu_output_ms);
+        result.timings.use_vb = true;
+#endif
+    } else {
+        cv::Mat mat;
+        bool skip_preprocess = false;
+        if (!preprocessed.empty()) {
+            mat = preprocessed.to_mat_copy();
+            skip_preprocess = true;
+        } else {
+            mat = frame.to_mat_copy();
+        }
+        if (mat.empty()) {
+            throw std::runtime_error("Frame is empty");
+        }
+
+        auto t_cpu_start = std::chrono::steady_clock::now();
+        if (!skip_preprocess && preprocess_type == "letterbox") {
+            if (target_w <= 0 || target_h <= 0) {
+                target_w = mat.cols;
+                target_h = mat.rows;
+            }
+            result.preprocess_meta = compute_letterbox_meta(mat.cols, mat.rows, target_w, target_h,
+                                                            preprocess.center);
+
+            int new_w = static_cast<int>(std::floor(mat.cols * result.preprocess_meta.scale));
+            int new_h = static_cast<int>(std::floor(mat.rows * result.preprocess_meta.scale));
+            cv::Mat resized;
+            if (new_w > 0 && new_h > 0 &&
+                (new_w != mat.cols || new_h != mat.rows)) {
+                cv::resize(mat, resized, cv::Size(new_w, new_h));
+            } else {
+                resized = mat;
+            }
+
+            int pad_w = target_w - new_w;
+            int pad_h = target_h - new_h;
+            int left = preprocess.center ? pad_w / 2 : 0;
+            int top = preprocess.center ? pad_h / 2 : 0;
+            int right = std::max(0, pad_w - left);
+            int bottom = std::max(0, pad_h - top);
+
+            cv::copyMakeBorder(resized, mat, top, bottom, left, right,
+                               cv::BORDER_CONSTANT,
+                               cv::Scalar(preprocess.fill_value,
+                                          preprocess.fill_value,
+                                          preprocess.fill_value));
+        } else if (!skip_preprocess && (preprocess_type == "resize" || preprocess_type == "none")) {
+            if (target_w > 0 && target_h > 0 &&
+                (mat.cols != target_w || mat.rows != target_h || preprocess_type == "resize")) {
+                cv::resize(mat, mat, cv::Size(target_w, target_h));
+            }
+            fill_resize_meta(frame.width(), frame.height(), target_w, target_h,
+                             &result.preprocess_meta);
+        } else if (!skip_preprocess) {
+            throw std::runtime_error("Unsupported preprocess type: " + preprocess.type);
+        }
+        result.timings.cpu_pre_ms = elapsed_ms(t_cpu_start, std::chrono::steady_clock::now());
+
+        std::vector<float> input_data;
+        std::vector<int64_t> input_shape;
+        auto t_build_start = std::chrono::steady_clock::now();
+        build_float_input(mat, preprocess, &input_data, &input_shape);
+        result.timings.build_input_ms = elapsed_ms(t_build_start, std::chrono::steady_clock::now());
+
+        auto t_pre_end = std::chrono::steady_clock::now();
+        result.timings.preprocess_ms = elapsed_ms(t_pre_start, t_pre_end);
+        auto t_infer_start = std::chrono::steady_clock::now();
+        config.session->run_all(
+            input_data.data(),
+            input_shape,
+            &result.outputs,
+            &result.output_shapes);
+        auto t_infer_end = std::chrono::steady_clock::now();
+        result.timings.infer_ms = elapsed_ms(t_infer_start, t_infer_end);
+        copy_run_stats(config.session->last_run_stats(),
+                       &result.timings.tpu_input_ms,
+                       &result.timings.tpu_forward_ms,
+                       &result.timings.tpu_output_ms);
+    }
+#else
+    (void)frame;
+    (void)config;
+#endif
+
+    return result;
+}
+
+RoiExecutionResult execute_roi_inference(const lua_cv::Frame& frame,
+                                         const Roi& roi,
+                                         const ModelExecutorConfig& config) {
+    RoiExecutionResult result;
+    const PreprocessConfig& preprocess = *config.preprocess_config;
+    auto t_pre_start = std::chrono::steady_clock::now();
+
+    int target_w = config.crop_size_explicit ? config.crop_width : preprocess.input_width;
+    int target_h = config.crop_size_explicit ? config.crop_height : preprocess.input_height;
+    if (target_w <= 0 || target_h <= 0) {
+        target_w = roi.w;
+        target_h = roi.h;
+    }
+
+    result.preprocess_meta.ori_w = roi.w;
+    result.preprocess_meta.ori_h = roi.h;
+    result.preprocess_meta.input_w = target_w;
+    result.preprocess_meta.input_h = target_h;
+
+#ifdef USE_CVI_TPU
+    if (!config.session) {
+        throw std::runtime_error("CviSession not initialized");
+    }
+
+    bool use_vb = false;
+    lua_cv::Frame preprocessed;
+    std::string preprocess_type = to_lower(preprocess.type);
+
+#ifdef USE_CVI_MPI
+    if (config.session->supports_vb_input() &&
+        frame.storage_type() == lua_cv::Frame::StorageType::CVI) {
+        auto spec = config.session->get_vb_input_spec();
+        lua_cv::PixelFormat out_pf = lua_cv::from_cvi_pixel_format(spec.pixel_format);
+        target_w = static_cast<int>(spec.width);
+        target_h = static_cast<int>(spec.height);
+        result.preprocess_meta.input_w = target_w;
+        result.preprocess_meta.input_h = target_h;
+
+        try {
+            result.vpss_attempted = true;
+            auto t_vpss_start = std::chrono::steady_clock::now();
+            lua_cv::Frame work;
+            if (frame.video_frame()) {
+                work = lua_cv::Frame(*frame.video_frame(), false);
+            } else {
+                work = frame.clone();
+            }
+
+            lua_cv::CviVpssProcessor vpss;
+            if (preprocess_type == "letterbox") {
+                vpss.crop(work, roi.x, roi.y, roi.w, roi.h);
+                result.preprocess_meta = compute_letterbox_meta(roi.w, roi.h, target_w, target_h,
+                                                                preprocess.center);
+                vpss.letterbox(work, target_w, target_h,
+                               static_cast<uint8_t>(preprocess.fill_value),
+                               nullptr, out_pf);
+            } else if (preprocess_type == "resize" || preprocess_type == "none") {
+                if (roi.w != target_w || roi.h != target_h || preprocess_type == "resize") {
+                    vpss.crop_resize(work, roi.x, roi.y, roi.w, roi.h,
+                                     target_w, target_h, out_pf);
+                } else {
+                    vpss.crop(work, roi.x, roi.y, roi.w, roi.h);
+                    if (work.pixel_format() != out_pf) {
+                        vpss.convert_format(work, out_pf);
+                    }
+                }
+                fill_resize_meta(roi.w, roi.h, target_w, target_h, &result.preprocess_meta);
+            } else {
+                throw std::runtime_error("Unsupported preprocess type: " + preprocess.type);
+            }
+
+            preprocessed = std::move(work);
+            std::string reason;
+            if (lua_cv::cv_helpers::can_zero_copy(
+                    preprocessed,
+                    spec.pixel_format,
+                    spec.width,
+                    spec.height,
+                    &reason)) {
+                use_vb = true;
+            }
+            result.use_vb = use_vb;
+            result.vpss_ms = elapsed_ms(t_vpss_start, std::chrono::steady_clock::now());
+        } catch (const std::exception& e) {
+            result.warning = ExecutionWarning{"VPSS ROI preprocess failed", e.what()};
+            preprocessed = lua_cv::Frame();
+        }
+    }
+#endif
+
+    if (use_vb) {
+#ifdef USE_CVI_MPI
+        auto vb_mem = preprocessed.as_vb_memory();
+        if (!vb_mem) {
+            throw std::runtime_error("Failed to get VB memory from ROI frame");
+        }
+        auto t_pre_end = std::chrono::steady_clock::now();
+        result.preprocess_ms = elapsed_ms(t_pre_start, t_pre_end);
+        auto t_infer_start = std::chrono::steady_clock::now();
+        config.session->run_vb(vb_mem, &result.outputs, &result.output_shapes);
+        auto t_infer_end = std::chrono::steady_clock::now();
+        result.infer_ms = elapsed_ms(t_infer_start, t_infer_end);
+        copy_run_stats(config.session->last_run_stats(),
+                       &result.tpu_input_ms,
+                       &result.tpu_forward_ms,
+                       &result.tpu_output_ms);
+#endif
+    } else {
+        cv::Mat mat;
+        bool skip_preprocess = false;
+        if (!preprocessed.empty()) {
+            mat = preprocessed.to_mat_copy();
+            skip_preprocess = true;
+        } else {
+            cv::Mat src = frame.to_mat_copy();
+            if (src.empty()) {
+                result.valid = false;
+                return result;
+            }
+
+            cv::Rect roi_rect(roi.x, roi.y, roi.w, roi.h);
+            mat = src(roi_rect).clone();
+        }
+
+        auto t_cpu_start = std::chrono::steady_clock::now();
+        if (!skip_preprocess && preprocess_type == "letterbox") {
+            result.preprocess_meta = compute_letterbox_meta(roi.w, roi.h, target_w, target_h,
+                                                            preprocess.center);
+            int new_w = static_cast<int>(std::floor(roi.w * result.preprocess_meta.scale));
+            int new_h = static_cast<int>(std::floor(roi.h * result.preprocess_meta.scale));
+            cv::Mat resized;
+            if (new_w > 0 && new_h > 0 &&
+                (new_w != roi.w || new_h != roi.h)) {
+                cv::resize(mat, resized, cv::Size(new_w, new_h));
+            } else {
+                resized = mat;
+            }
+
+            int pad_w = target_w - new_w;
+            int pad_h = target_h - new_h;
+            int left = preprocess.center ? pad_w / 2 : 0;
+            int top = preprocess.center ? pad_h / 2 : 0;
+            int right = std::max(0, pad_w - left);
+            int bottom = std::max(0, pad_h - top);
+
+            cv::copyMakeBorder(resized, mat, top, bottom, left, right,
+                               cv::BORDER_CONSTANT,
+                               cv::Scalar(preprocess.fill_value,
+                                          preprocess.fill_value,
+                                          preprocess.fill_value));
+        } else if (!skip_preprocess &&
+                   (preprocess_type == "resize" || preprocess_type == "none")) {
+            if (mat.cols != target_w || mat.rows != target_h || preprocess_type == "resize") {
+                cv::resize(mat, mat, cv::Size(target_w, target_h));
+            }
+            fill_resize_meta(roi.w, roi.h, target_w, target_h, &result.preprocess_meta);
+        } else if (!skip_preprocess) {
+            throw std::runtime_error("Unsupported preprocess type: " + preprocess.type);
+        }
+        result.cpu_pre_ms = elapsed_ms(t_cpu_start, std::chrono::steady_clock::now());
+
+        std::vector<float> input_data;
+        std::vector<int64_t> input_shape;
+        auto t_build_start = std::chrono::steady_clock::now();
+        build_float_input(mat, preprocess, &input_data, &input_shape);
+        result.build_input_ms = elapsed_ms(t_build_start, std::chrono::steady_clock::now());
+
+        auto t_pre_end = std::chrono::steady_clock::now();
+        result.preprocess_ms = elapsed_ms(t_pre_start, t_pre_end);
+        auto t_infer_start = std::chrono::steady_clock::now();
+        config.session->run_all(
+            input_data.data(),
+            input_shape,
+            &result.outputs,
+            &result.output_shapes);
+        auto t_infer_end = std::chrono::steady_clock::now();
+        result.infer_ms = elapsed_ms(t_infer_start, t_infer_end);
+        copy_run_stats(config.session->last_run_stats(),
+                       &result.tpu_input_ms,
+                       &result.tpu_forward_ms,
+                       &result.tpu_output_ms);
+    }
+#else
+    (void)frame;
+    (void)roi;
+    (void)config;
+#endif
+
+    return result;
+}
+
+}  // namespace node
