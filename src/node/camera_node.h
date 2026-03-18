@@ -56,6 +56,10 @@ public:
     double infer_fps_limit() const { return config_.infer_fps_limit; }
     bool get_stream_binding(int* vpss_grp, int* vpss_chn) const;
 
+    // Configuration access (for ModelNode coordinate mapping)
+    int config_width() const { return config_.width; }
+    int config_height() const { return config_.height; }
+
 private:
     // Configuration
     struct Config {

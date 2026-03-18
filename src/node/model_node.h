@@ -58,15 +58,38 @@ private:
     void cleanupLuaRef();
     void emitProfile(const nlohmann::json& profile);
 
-    // Configuration
-    std::string model_path_;
-    std::string script_path_;
-    InputMode input_mode_ = FULL_FRAME;
-    int crop_width_ = 112;
-    int crop_height_ = 112;
-    bool crop_size_explicit_ = false;
-    float conf_threshold_ = 0.25f;
-    int infer_timeout_ms_ = 5000;
+    // Configuration struct
+    struct Config {
+        // Model configuration
+        std::string model_path;
+        std::string script_path;
+        InputMode input_mode = FULL_FRAME;
+        int crop_width = 112;
+        int crop_height = 112;
+        bool crop_size_explicit = false;
+        float conf_threshold = 0.25f;
+        int infer_timeout_ms = 5000;
+
+        // Lua integration
+        bool profile = false;
+        bool output = false;
+        bool debug = false;
+
+        // WebSocket configuration
+        bool websocket = true;
+        int ws_port = 8090;
+        std::string ws_path = "/";
+        int ws_max_clients = 8;
+
+        // Preview video stream configuration
+        std::string preview_resolution = "";  // e.g., "640x640", "" = use original frame size
+        int preview_fps = 15;       // JPEG preview frame rate (default 15fps)
+        int jpeg_quality = 75;      // JPEG encoding quality (1-100)
+
+        // Parsed resolution values
+        int preview_width = 0;      // Parsed from preview_resolution
+        int preview_height = 0;     // Parsed from preview_resolution
+    } config_;
 
     // Lua integration (independent State for thread safety)
     lua_State* L_ = nullptr;
@@ -75,13 +98,6 @@ private:
     LuaIntf::LuaRef preprocess_config_ref_;
     PreprocessConfig preprocess_config_;
     bool preprocess_config_explicit_ = false;
-    bool profile_ = false;
-    bool websocket_ = true;
-    int ws_port_ = 8090;
-    std::string ws_path_ = "/";
-    int ws_max_clients_ = 8;
-    bool output_ = false;
-    bool debug_ = false;
 
     // TPU Session
     std::unique_ptr<inference::CviSession> session_;
@@ -99,6 +115,8 @@ private:
     std::atomic<uint64_t> infer_count_{0};
     std::atomic<uint64_t> error_count_{0};
     std::atomic<uint64_t> ws_event_count_{0};
+    std::chrono::steady_clock::time_point last_preview_time_{};  // For preview rate limiting
+    int preview_interval_ms_;  // Calculated from preview_fps
     double infer_ema_ms_ = 0.0;
     static constexpr double kEmaAlpha = 0.2;
 };

@@ -358,19 +358,19 @@ int ModelNode::onCreate(const nlohmann::json& config) {
     // 1. Parse configuration
     // Support both 'model' (internal) and 'uri' (Node-RED sscma-node) fields
     if (config.contains("model")) {
-        model_path_ = config.at("model");
+        config_.model_path = config.at("model");
     } else if (config.contains("uri")) {
-        model_path_ = config.at("uri");
+        config_.model_path = config.at("uri");
     } else {
         // Default model path for Node-RED compatibility
-        model_path_ = "/usr/share/supervisor/models/yolo11n_detection_cv181x_int8.cvimodel";
+        config_.model_path = "/usr/share/supervisor/models/yolo11n_detection_cv181x_int8.cvimodel";
     }
 
 #ifdef USE_CVI_TPU
     {
         struct stat st {};
-        if (stat(model_path_.c_str(), &st) != 0) {
-            last_error_ = "Model file not found: " + model_path_;
+        if (stat(config_.model_path.c_str(), &st) != 0) {
+            last_error_ = "Model file not found: " + config_.model_path;
             return MA_ENOENT;
         }
     }
@@ -378,68 +378,117 @@ int ModelNode::onCreate(const nlohmann::json& config) {
 
     // Support both 'script' (internal) and use default for Node-RED compatibility
     if (config.contains("script")) {
-        script_path_ = config.at("script");
+        config_.script_path = config.at("script");
     } else {
         // Default script path for Node-RED compatibility
-        script_path_ = "/userdata/scripts/yolo11_tensor_detector.lua";
+        config_.script_path = "/userdata/scripts/yolo11_tensor_detector.lua";
     }
 
     // Verify script file exists
     {
         struct stat st {};
-        if (stat(script_path_.c_str(), &st) != 0) {
-            last_error_ = "Script file not found: " + script_path_;
+        if (stat(config_.script_path.c_str(), &st) != 0) {
+            last_error_ = "Script file not found: " + config_.script_path;
             return MA_ENOENT;
         }
     }
 
     // Support both 'threshold' (internal) and 'tscore' (Node-RED sscma-node) fields
     if (config.contains("threshold")) {
-        conf_threshold_ = config["threshold"].get<float>();
+        config_.conf_threshold = config["threshold"].get<float>();
     } else if (config.contains("tscore")) {
-        conf_threshold_ = config["tscore"].get<float>();
+        config_.conf_threshold = config["tscore"].get<float>();
     }
     if (config.contains("input_mode")) {
         std::string mode = config["input_mode"];
-        input_mode_ = (mode == "cropped_roi") ? CROPPED_ROI : FULL_FRAME;
+        config_.input_mode = (mode == "cropped_roi") ? CROPPED_ROI : FULL_FRAME;
     }
     if (config.contains("crop_size") && config["crop_size"].is_array()) {
-        crop_width_ = config["crop_size"][0].get<int>();
-        crop_height_ = config["crop_size"][1].get<int>();
-        crop_size_explicit_ = true;
+        config_.crop_width = config["crop_size"][0].get<int>();
+        config_.crop_height = config["crop_size"][1].get<int>();
+        config_.crop_size_explicit = true;
     }
     if (config.contains("timeout_ms")) {
-        infer_timeout_ms_ = config["timeout_ms"].get<int>();
+        config_.infer_timeout_ms = config["timeout_ms"].get<int>();
     }
     if (config.contains("profile")) {
-        profile_ = config["profile"].get<bool>();
+        config_.profile = config["profile"].get<bool>();
     } else {
         const char* env = std::getenv("MODEL_NODE_PROFILE");
         if (env && std::string(env) == "1") {
-            profile_ = true;
+            config_.profile = true;
         }
     }
     if (config.contains("websocket")) {
-        websocket_ = config["websocket"].get<bool>();
+        config_.websocket = config["websocket"].get<bool>();
     }
     if (config.contains("ws_port")) {
-        ws_port_ = config["ws_port"].get<int>();
+        config_.ws_port = config["ws_port"].get<int>();
     }
     if (config.contains("ws_path")) {
-        ws_path_ = config["ws_path"].get<std::string>();
+        config_.ws_path = config["ws_path"].get<std::string>();
     }
     if (config.contains("ws_max_clients")) {
-        ws_max_clients_ = config["ws_max_clients"].get<int>();
+        config_.ws_max_clients = config["ws_max_clients"].get<int>();
     }
     if (config.contains("output")) {
-        output_ = config["output"].get<bool>();
+        config_.output = config["output"].get<bool>();
     }
     if (config.contains("debug")) {
-        debug_ = config["debug"].get<bool>();
+        config_.debug = config["debug"].get<bool>();
     }
 
-    if (debug_) {
-        output_ = true;
+    if (config_.debug) {
+        config_.output = true;
+    }
+
+    // Preview video stream configuration
+    if (config.contains("preview_resolution") && config["preview_resolution"].is_string()) {
+        config_.preview_resolution = config["preview_resolution"].get<std::string>();
+
+        // 解析 "WIDTHxHEIGHT" 格式（如 "640x640"）
+        std::string res = config_.preview_resolution;
+        size_t sep_pos = res.find_first_of("xX");
+        if (sep_pos != std::string::npos && sep_pos > 0 && sep_pos < res.length() - 1) {
+            try {
+                config_.preview_width = std::stoi(res.substr(0, sep_pos));
+                config_.preview_height = std::stoi(res.substr(sep_pos + 1));
+
+                // 验证分辨率
+                if (config_.preview_width > 0 && config_.preview_height > 0) {
+                    std::cout << "[ModelNode] Preview resolution: " << config_.preview_width
+                              << "x" << config_.preview_height << std::endl;
+                } else {
+                    std::cerr << "[ModelNode] Invalid preview_resolution format, using original size" << std::endl;
+                    config_.preview_width = 0;
+                    config_.preview_height = 0;
+                }
+            } catch (const std::exception& e) {
+                std::cerr << "[ModelNode] Failed to parse preview_resolution: " << e.what() << std::endl;
+                config_.preview_width = 0;
+                config_.preview_height = 0;
+            }
+        } else {
+            std::cerr << "[ModelNode] Invalid preview_resolution format (expected WIDTHxHEIGHT), using original size" << std::endl;
+            config_.preview_width = 0;
+            config_.preview_height = 0;
+        }
+    }
+
+    if (config.contains("preview_fps")) {
+        config_.preview_fps = config["preview_fps"].get<int>();
+        if (config_.preview_fps <= 0 || config_.preview_fps > 30) {
+            std::cerr << "[ModelNode] Invalid preview_fps, using default 15" << std::endl;
+            config_.preview_fps = 15;
+        }
+    }
+
+    if (config.contains("jpeg_quality")) {
+        config_.jpeg_quality = config["jpeg_quality"].get<int>();
+        if (config_.jpeg_quality < 1 || config_.jpeg_quality > 100) {
+            std::cerr << "[ModelNode] Invalid jpeg_quality, using default 75" << std::endl;
+            config_.jpeg_quality = 75;
+        }
     }
 
     // 2. Set LUA_PATH from script directory if not already set
@@ -448,9 +497,9 @@ int ModelNode::onCreate(const nlohmann::json& config) {
         // Build LUA_PATH including both the script directory and its parent.
         // Scripts often use require("scripts.lib.foo") which resolves relative to
         // the parent of the scripts/ directory, so we must include parent_dir/?.lua.
-        size_t last_slash = script_path_.find_last_of("/\\");
+        size_t last_slash = config_.script_path.find_last_of("/\\");
         if (last_slash != std::string::npos) {
-            std::string script_dir = script_path_.substr(0, last_slash);
+            std::string script_dir = config_.script_path.substr(0, last_slash);
             std::string parent_dir;
             size_t parent_slash = script_dir.find_last_of("/\\");
             if (parent_slash != std::string::npos) {
@@ -479,7 +528,7 @@ int ModelNode::onCreate(const nlohmann::json& config) {
     lua_utils::register_module(L_);
 
     // 3. Load Lua script
-    if (luaL_dofile(L_, script_path_.c_str()) != LUA_OK) {
+    if (luaL_dofile(L_, config_.script_path.c_str()) != LUA_OK) {
         std::string err = lua_tostring(L_, -1);
         last_error_ = "Lua script error: " + err;
         lua_close(L_);
@@ -517,7 +566,7 @@ int ModelNode::onCreate(const nlohmann::json& config) {
     // 5. Load TPU model
 #ifdef USE_CVI_TPU
     try {
-        session_ = std::make_unique<inference::CviSession>(model_path_);
+        session_ = std::make_unique<inference::CviSession>(config_.model_path);
 
         // Validate model input matches preprocess config
         if (preprocess_config_ref_.isTable()) {
@@ -555,9 +604,9 @@ int ModelNode::onCreate(const nlohmann::json& config) {
     }
 #else
     // CPU-only build: validate file exists
-    FILE* f = fopen(model_path_.c_str(), "r");
+    FILE* f = fopen(config_.model_path.c_str(), "r");
     if (!f) {
-        last_error_ = "Model file not found: " + model_path_;
+        last_error_ = "Model file not found: " + config_.model_path;
         cleanupLuaRef();
         return MA_ENOENT;
     }
@@ -566,7 +615,7 @@ int ModelNode::onCreate(const nlohmann::json& config) {
 
     // 6. Validate CROPPED_ROI mode constraints
     // CROPPED_ROI mode requires upstream ModelNode and select_rois in script
-    if (input_mode_ == CROPPED_ROI) {
+    if (config_.input_mode == CROPPED_ROI) {
         bool has_model_upstream = false;
         for (const auto& [dep_id, dep] : dependencies_) {
             if (dep->type() == "model") {
@@ -633,11 +682,11 @@ int ModelNode::onStart() {
 
     running_.store(true, std::memory_order_release);
 
-    if (websocket_) {
+    if (config_.websocket) {
         lua_cv::WebSocketTransport::Config ws_cfg;
-        ws_cfg.port = ws_port_;
-        ws_cfg.path = ws_path_;
-        ws_cfg.max_clients = ws_max_clients_;
+        ws_cfg.port = config_.ws_port;
+        ws_cfg.path = config_.ws_path;
+        ws_cfg.max_clients = config_.ws_max_clients;
         ws_ = std::make_unique<lua_cv::WebSocketTransport>(ws_cfg);
         if (!ws_->start()) {
             last_error_ = "ModelNode WebSocket start failed";
@@ -647,8 +696,8 @@ int ModelNode::onStart() {
             return MA_EIO;
         }
         event("websocket", MA_OK, {
-            {"port", ws_port_},
-            {"path", ws_path_},
+            {"port", config_.ws_port},
+            {"path", config_.ws_path},
             {"type", "json"}
         });
     }
@@ -703,7 +752,7 @@ int ModelNode::onControl(const std::string& action, const nlohmann::json& data) 
         if (!data.contains("value")) {
             return MA_EINVAL;
         }
-        conf_threshold_ = data.at("value").get<float>();
+        config_.conf_threshold = data.at("value").get<float>();
         return MA_OK;
     }
 
@@ -767,11 +816,11 @@ void ModelNode::inferLoop() {
             double elapsed_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
 
             // Check timeout (soft timeout - just warn)
-            if (elapsed_ms > infer_timeout_ms_) {
+            if (elapsed_ms > config_.infer_timeout_ms) {
                 event("warning", 0, {
                     {"message", "Inference timeout"},
                     {"elapsed_ms", elapsed_ms},
-                    {"timeout_ms", infer_timeout_ms_}
+                    {"timeout_ms", config_.infer_timeout_ms}
                 });
             }
 
@@ -804,36 +853,90 @@ void ModelNode::inferLoop() {
 
             event("invoke", MA_OK, event_data);
 
-            if (websocket_ && ws_) {
+            if (config_.websocket && ws_) {
                 try {
-                    nlohmann::json ws_msg = {
-                        {"type", static_cast<int>(MessageType::EVENT)},
-                        {"name", "invoke"},
-                        {"code", MA_OK},
-                        {"data", event_data}
-                    };
+                    // Build preview-compatible format (matches main branch):
+                    // {"data": {"boxes":[[x,y,w,h,score,class_id],...], "labels":[...], "resolution":[w,h], "image":"..."}}
+                    nlohmann::json preview_data = nlohmann::json::object();
 
-                    // Add base64 encoded image when output is enabled
-                    if (output_ && ws_msg["data"].is_object()) {
-                        std::string base64_image = encode_frame_to_base64_jpeg(ctx->frame->frame());
-                        if (!base64_image.empty()) {
-                            ws_msg["data"]["image"] = base64_image;
-                        } else {
-                            ws_msg["data"]["image"] = "";
+                    // Transform boxes: object array → array-of-arrays (frontend compatibility)
+                    if (event_data.contains("boxes") && event_data["boxes"].is_array()) {
+                        nlohmann::json boxes_arr = nlohmann::json::array();
+                        nlohmann::json labels_arr = nlohmann::json::array();
+                        for (const auto& box : event_data["boxes"]) {
+                            if (box.is_object()) {
+                                double x = box.value("x", 0.0);
+                                double y = box.value("y", 0.0);
+                                double w = box.value("w", 0.0);
+                                double h = box.value("h", 0.0);
+                                double score = box.value("score", 0.0);
+                                int cls = box.value("class_id", 0);
+                                boxes_arr.push_back({x, y, w, h, score, cls});
+                                labels_arr.push_back(box.value("label", ""));
+                            }
                         }
-                    } else {
-                        // Clear image field when output is disabled
-                        if (ws_msg["data"].is_object()) {
-                            ws_msg["data"]["image"] = "";
-                        }
+                        preview_data["boxes"] = std::move(boxes_arr);
+                        preview_data["labels"] = std::move(labels_arr);
                     }
 
+                    // Resolution field - use preview_resolution config if set
+                    int fw = config_.preview_width > 0 ? config_.preview_width : event_data.value("frame_width", 0);
+                    int fh = config_.preview_height > 0 ? config_.preview_height : event_data.value("frame_height", 0);
+                    preview_data["resolution"] = {fw, fh};
+
+                    // Base64 JPEG image with configurable frame rate
+                    try {
+                        // Calculate frame interval from preview_fps
+                        preview_interval_ms_ = 1000 / config_.preview_fps;
+
+                        auto now_tp = std::chrono::steady_clock::now();
+                        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            now_tp - last_preview_time_).count();
+
+                        if (elapsed_ms >= preview_interval_ms_) {
+                            last_preview_time_ = now_tp;
+                            cv::Mat mat = ctx->frame->frame().to_mat_copy();
+
+                            if (!mat.empty()) {
+                                // Apply preview resolution scaling if configured
+                                if (config_.preview_width > 0 && config_.preview_height > 0) {
+                                    if (mat.cols != config_.preview_width || mat.rows != config_.preview_height) {
+                                        cv::Mat resized;
+                                        cv::resize(mat, resized, cv::Size(config_.preview_width, config_.preview_height),
+                                                   0, 0, cv::INTER_LINEAR);
+                                        mat = std::move(resized);
+                                    }
+                                }
+
+                                // to_mat_copy() already handles RGB→BGR conversion (see frame.cpp:234)
+                                // No need to convert again here
+
+                                // JPEG encoding with configurable quality
+                                std::vector<uchar> jpeg_buf;
+                                std::vector<int> params = {cv::IMWRITE_JPEG_QUALITY, config_.jpeg_quality};
+                                if (cv::imencode(".jpg", mat, jpeg_buf, params)) {
+                                    preview_data["image"] = base64_encode(jpeg_buf.data(), jpeg_buf.size());
+                                } else {
+                                    preview_data["image"] = "";
+                                }
+                            } else {
+                                preview_data["image"] = "";
+                            }
+                        } else {
+                            preview_data["image"] = "";  // Skip JPEG this frame (rate limit)
+                        }
+                    } catch (...) {
+                        preview_data["image"] = "";
+                    }
+
+                    // Send simplified format (matches main branch frontend expectation)
+                    nlohmann::json ws_msg = {{"data", std::move(preview_data)}};
                     std::string payload = ws_msg.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
-                    if (ws_->broadcast_text(payload.c_str(), payload.size())) {
+                    if (ws_->broadcast_binary(reinterpret_cast<const uint8_t*>(payload.c_str()), payload.size())) {
                         ws_event_count_.fetch_add(1, std::memory_order_relaxed);
                     }
                 } catch (const std::exception& e) {
-                    if (debug_) {
+                    if (config_.debug) {
                         std::cerr << "[ModelNode] websocket serialize/send failed: " << e.what() << "\n";
                     }
                 }
@@ -855,7 +958,7 @@ void ModelNode::inferLoop() {
 
 nlohmann::json ModelNode::runInference(const lua_cv::Frame& frame,
                                         const nlohmann::json& upstream) {
-    if (input_mode_ == FULL_FRAME) {
+    if (config_.input_mode == FULL_FRAME) {
         return runFullFrameInference(frame, upstream);
     } else {
         return runCroppedRoiInference(frame, upstream);
@@ -1071,11 +1174,20 @@ nlohmann::json ModelNode::runFullFrameInference(const lua_cv::Frame& frame,
 #endif
 
     // Build metadata for postprocess
+    // Use Camera config resolution if available (for frontend coordinate mapping)
+    // This ensures detection boxes are scaled to match the frontend video stream
+    int meta_frame_w = frame.width();
+    int meta_frame_h = frame.height();
+    if (upstream_camera_) {
+        meta_frame_w = upstream_camera_->config_width();
+        meta_frame_h = upstream_camera_->config_height();
+    }
+
     nlohmann::json meta = {
         {"upstream", upstream},
-        {"threshold", conf_threshold_},
-        {"frame_width", frame.width()},
-        {"frame_height", frame.height()},
+        {"threshold", config_.conf_threshold},
+        {"frame_width", meta_frame_w},
+        {"frame_height", meta_frame_h},
         {"output_count", session_ ? session_->output_count() : 1}
     };
     fill_meta_json(preprocess_meta, &meta);
@@ -1085,7 +1197,7 @@ nlohmann::json ModelNode::runFullFrameInference(const lua_cv::Frame& frame,
     auto t_post_end = std::chrono::steady_clock::now();
     postprocess_ms = elapsed_ms(t_post_start, t_post_end);
 
-    if (profile_) {
+    if (config_.profile) {
         nlohmann::json profile = {
             {"mode", "full_frame"},
             {"preprocess_ms", preprocess_ms},
@@ -1177,8 +1289,8 @@ nlohmann::json ModelNode::runCroppedRoiInference(const lua_cv::Frame& frame,
         double postprocess_ms_local = 0.0;
         bool vpss_attempted_local = false;
 
-        int target_w = crop_size_explicit_ ? crop_width_ : preprocess_config_.input_width;
-        int target_h = crop_size_explicit_ ? crop_height_ : preprocess_config_.input_height;
+        int target_w = config_.crop_size_explicit ? config_.crop_width : preprocess_config_.input_width;
+        int target_h = config_.crop_size_explicit ? config_.crop_height : preprocess_config_.input_height;
         if (target_w <= 0 || target_h <= 0) {
             target_w = w;
             target_h = h;
@@ -1379,7 +1491,7 @@ nlohmann::json ModelNode::runCroppedRoiInference(const lua_cv::Frame& frame,
         nlohmann::json meta = {
             {"roi", {{"x", x}, {"y", y}, {"w", w}, {"h", h}}},
             {"upstream", upstream},
-            {"threshold", conf_threshold_}
+            {"threshold", config_.conf_threshold}
         };
         fill_meta_json(preprocess_meta, &meta);
 
@@ -1396,7 +1508,7 @@ nlohmann::json ModelNode::runCroppedRoiInference(const lua_cv::Frame& frame,
         items.push_back(item);
     }
 
-    if (profile_ && roi_count > 0) {
+    if (config_.profile && roi_count > 0) {
         nlohmann::json profile = {
             {"mode", "cropped_roi"},
             {"roi_count", roi_count},
@@ -1513,7 +1625,7 @@ void ModelNode::updateEwma(double elapsed_ms) {
 }
 
 void ModelNode::emitProfile(const nlohmann::json& profile) {
-    if (!profile_) {
+    if (!config_.profile) {
         return;
     }
 
