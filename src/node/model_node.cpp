@@ -314,6 +314,13 @@ int ModelNode::onStart() {
     if (!upstream_camera_) {
         bindUpstreamCamera();
     }
+
+    // If this node will broadcast a preview (WebSocket), request full-resolution
+    // STREAM frames from the upstream camera so preview quality is maximized.
+    if (upstream_camera_ && config_.websocket) {
+        upstream_camera_->set_deliver_stream_frame(true);
+    }
+
     running_.store(true, std::memory_order_release);
 
     if (config_.websocket) {
@@ -493,7 +500,11 @@ void ModelNode::maybeBroadcastPreview(const PipelineContext& ctx, const nlohmann
     }
 
     try {
-        // Fallback: software JPEG encoding (original implementation)
+        // Prefer full-resolution STREAM frame for preview when available;
+        // fall back to INFER frame for backward compatibility.
+        const lua_cv::Frame& preview_frame =
+            ctx.has_stream_frame() ? ctx.stream_frame->frame() : ctx.frame->frame();
+
         ModelPreviewFormatConfig preview_config;
         preview_config.preview_width = config_.preview_width;
         preview_config.preview_height = config_.preview_height;
@@ -501,7 +512,7 @@ void ModelNode::maybeBroadcastPreview(const PipelineContext& ctx, const nlohmann
 
         nlohmann::json ws_msg = build_model_preview_message(
             event_data,
-            ctx.frame->frame(),
+            preview_frame,
             preview_config,
             &last_preview_time_,
             &preview_interval_ms_);
@@ -739,17 +750,17 @@ void ModelNode::forwardToDownstream(PipelineContext* ctx, const nlohmann::json& 
 
     std::lock_guard<std::mutex> lock(subscribers_mutex_);
     for (auto* mbox : downstream_) {
-        // Increase reference count before creating new PipelineContext
         ctx->frame->ref();
+        if (ctx->stream_frame) ctx->stream_frame->ref();
 
         auto* next_ctx = new PipelineContext{
             ctx->frame,
+            ctx->stream_frame,
             result,
             ctx->frame_id
         };
 
         if (!mbox->post(next_ctx, 0)) {
-            // Queue full, cleanup
             delete next_ctx;
         }
     }

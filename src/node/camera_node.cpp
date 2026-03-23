@@ -54,6 +54,10 @@ int CameraNode::onCreate(const nlohmann::json& config) {
     if (config.contains("light")) {
         config_.light = config["light"].get<int>();
     }
+    if (config.contains("deliver_stream_frame")) {
+        deliver_stream_frame_.store(config["deliver_stream_frame"].get<bool>(),
+                                   std::memory_order_release);
+    }
 
     std::cout << "[CameraNode] Configuration: " << config_.width << "x" << config_.height
               << " @ " << config_.fps << " fps, sensor=" << config_.sensor
@@ -405,14 +409,26 @@ bool CameraNode::processFrame(lua_cv::Frame& frame) {
             std::chrono::steady_clock::now().time_since_epoch()).count()));
     sf->set_frame_id(frame_id);
 
+    // Optionally capture STREAM channel (full-res) frame alongside INFER frame.
+    // This uses a non-blocking read so it never blocks the capture loop.
+    SharedFrame* stream_sf = nullptr;
+#ifdef USE_CVI_CAMERA
+    if (deliver_stream_frame_.load(std::memory_order_acquire) && camera_) {
+        lua_cv::Frame stream_frame;
+        if (camera_->read_stream(stream_frame, 0)) {
+            stream_sf = new SharedFrame(std::move(stream_frame));
+            stream_sf->set_timestamp(sf->timestamp());
+            stream_sf->set_frame_id(frame_id);
+        }
+    }
+#endif
+
     // Distribute to inference channel subscribers
     if (config_.enable_inference && inference_enabled_.load(std::memory_order_acquire)) {
-        distributeFrame(sf, frame_id, FrameChannel::INFER);
+        distributeFrame(sf, stream_sf, frame_id, FrameChannel::INFER);
     }
 
-    // Note: Stream channel uses hardware binding (VPSS->VENC), not MessageBox
-
-    // Release initial reference (subscribers hold subsequent references)
+    if (stream_sf) stream_sf->release();  // Release initial ref; subscribers hold theirs
     sf->release();
 
     // Update skip timing based on downstream feedback
@@ -474,16 +490,20 @@ double CameraNode::getMaxDownstreamProcMs() const {
     return max_proc_ms;
 }
 
-void CameraNode::distributeFrame(SharedFrame* sf, uint64_t frame_id, FrameChannel channel) {
+void CameraNode::distributeFrame(SharedFrame* sf, SharedFrame* stream_sf,
+                                   uint64_t frame_id, FrameChannel channel) {
     std::lock_guard<std::mutex> lock(channel_mutex_);
     auto& subs = channel_subscribers_[static_cast<size_t>(channel)];
 
     for (auto* mbox : subs) {
-        // Increase reference count before creating PipelineContext
+        // Bump infer frame ref for this subscriber
         sf->ref();
+        // Bump stream frame ref for this subscriber (if present)
+        if (stream_sf) stream_sf->ref();
 
         auto* ctx = new PipelineContext{
             sf,
+            stream_sf,
             nlohmann::json{},  // Empty upstream_result (CameraNode is source)
             frame_id
         };

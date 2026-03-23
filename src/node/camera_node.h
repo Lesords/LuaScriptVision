@@ -44,6 +44,16 @@ public:
     void attach(FrameChannel ch, ContextBox* subscriber);
     void detach(FrameChannel ch, ContextBox* subscriber);
 
+    // Enable full-resolution STREAM frame delivery alongside INFER frames.
+    // Called by downstream nodes (e.g. ModelNode with preview) at onStart() time.
+    // Thread-safe: can be called concurrently with captureLoop().
+    void set_deliver_stream_frame(bool enabled) {
+        deliver_stream_frame_.store(enabled, std::memory_order_release);
+    }
+    bool deliver_stream_frame() const {
+        return deliver_stream_frame_.load(std::memory_order_acquire);
+    }
+
     // Downstream timing feedback (called by ModelNode)
     void report_proc_time(const std::string& node_id, double proc_ms);
     void stopCapture();
@@ -73,6 +83,7 @@ private:
         bool enable_inference = true;
         bool preview = false;
         int light = 0;
+        bool deliver_stream_frame = false;  // initial config value (see deliver_stream_frame_ atomic)
         // sscma-node compatibility config
         bool websocket = true;
         int ws_port = 8080;
@@ -128,6 +139,8 @@ private:
 
     // Enable/disable inference distribution (controlled by "enabled" action)
     std::atomic<bool> inference_enabled_{true};
+    // Enable/disable stream frame delivery (set by downstream nodes at startup)
+    std::atomic<bool> deliver_stream_frame_{false};
 
     // Statistics
     std::atomic<uint64_t> frame_count_{0};
@@ -141,7 +154,8 @@ private:
     void updateSkipTiming();
     double getMaxDownstreamProcMs() const;
     double effectiveInferFps() const;
-    void distributeFrame(SharedFrame* sf, uint64_t frame_id, FrameChannel channel);
+    void distributeFrame(SharedFrame* sf, SharedFrame* stream_sf,
+                         uint64_t frame_id, FrameChannel channel);
     int computeNobufThreshold() const;
     void applyExponentialBackoff();
 

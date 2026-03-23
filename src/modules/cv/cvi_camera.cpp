@@ -646,6 +646,23 @@ bool CviCamera::read(Frame& frame, int timeout_ms, bool log_error) {
     return read_internal(frame, timeout_ms, log_error);
 }
 
+bool CviCamera::read_stream(Frame& frame, int timeout_ms) {
+    if (!opened_ || !vpss_stream_chn_enabled_) {
+        return false;
+    }
+
+    VIDEO_FRAME_INFO_S cvi_frame{};
+    CVI_S32 rc = CVI_VPSS_GetChnFrame(vpss_grp_, vpss_stream_chn_, &cvi_frame, timeout_ms);
+    if (rc != CVI_SUCCESS) {
+        return false;
+    }
+
+    Frame out(cvi_frame, static_cast<int>(vpss_grp_), static_cast<int>(vpss_stream_chn_));
+    out.set_vpss_owner(static_cast<int>(vpss_grp_), static_cast<int>(vpss_stream_chn_));
+    frame = std::move(out);
+    return true;
+}
+
 bool CviCamera::wait_for_ready(int timeout_ms) {
     if (!opened_) {
         std::cerr << "[ERROR] CviCamera::wait_for_ready - camera not opened" << std::endl;

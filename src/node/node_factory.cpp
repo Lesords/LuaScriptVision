@@ -131,6 +131,19 @@ Node* NodeFactory::create(const std::string& id,
         setupDataFlow(data_node, dependencies);
     }
 
+#ifdef USE_CVI_MPI
+    // If this node requests stream frame delivery, enable it on all upstream CameraNodes.
+    if (config.value("deliverStreamFrame", false)) {
+        for (const auto& dep_id : dependencies) {
+            auto dep_it = nodes_.find(dep_id);
+            if (dep_it == nodes_.end()) continue;
+            if (auto* camera = dynamic_cast<CameraNode*>(dep_it->second.get())) {
+                camera->set_deliver_stream_frame(true);
+            }
+        }
+    }
+#endif
+
     // Collect nodes that need to be started (to start them outside the factory lock,
     // because onStart() may block for hundreds of ms, e.g. camera open + ISP warmup)
     std::vector<Node*> to_start;

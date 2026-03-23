@@ -40,6 +40,8 @@ public:
     bool read(Frame& frame) override;
     bool read(Frame& frame, int timeout_ms);
     bool read(Frame& frame, int timeout_ms, bool log_error);
+    // Read from stream channel (Chn0, full-resolution NV21). Non-blocking by default.
+    bool read_stream(Frame& frame, int timeout_ms = 0);
     bool wait_for_ready(int timeout_ms);
     void release() override;
 

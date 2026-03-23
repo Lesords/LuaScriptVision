@@ -1,6 +1,8 @@
 #include "node.h"
 #include "node_server.h"
 
+#include <iostream>
+
 namespace node {
 
 Node::Node(const std::string& id, const std::string& type)
@@ -144,6 +146,8 @@ void Node::response(const std::string& name, int code, const nlohmann::json& dat
 }
 
 void Node::event(const std::string& name, int code, const nlohmann::json& data) {
+    // 调试信息：输出事件名称、代码和数据内容
+    std::cout << "[Debug] Event: " << name << ", Code: " << code << ", Data: " << data.dump() << std::endl;
     if (server_) {
         server_->event(id_, name, code, data);
     }
