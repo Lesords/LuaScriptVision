@@ -18,7 +18,12 @@
 
 // Forward declarations
 namespace inference { class CviSession; }
-namespace lua_cv { class WebSocketTransport; }
+namespace lua_cv {
+class WebSocketTransport;
+#ifdef USE_CVI_MPI
+class VencEncoder;
+#endif
+}
 
 namespace node {
 
@@ -73,6 +78,10 @@ private:
     void cleanupLuaRef();
     void emitProfile(const nlohmann::json& profile);
 
+#ifdef USE_CVI_MPI
+    void h264EncodeLoop();
+#endif
+
     // Configuration struct
     struct Config {
         // Model configuration
@@ -96,14 +105,18 @@ private:
         std::string ws_path = "/";
         int ws_max_clients = 8;
 
-        // Preview video stream configuration
+        // Preview video stream configuration (software JPEG encoding)
         std::string preview_resolution = "";  // e.g., "640x640", "" = use original frame size
         int preview_fps = 15;       // JPEG preview frame rate (default 15fps)
-        int jpeg_quality = 75;      // JPEG encoding quality (1-100)
 
         // Parsed resolution values
         int preview_width = 0;      // Parsed from preview_resolution
         int preview_height = 0;     // Parsed from preview_resolution
+
+        // H.264 hardware encoding configuration (default enabled)
+        bool h264_preview = true;          // Enable H.264 hardware encoding (default: true)
+        int h264_bitrate_kbps = 2000;      // H.264 bitrate
+        int h264_gop = 30;                 // H.264 GOP size
     } config_;
 
     // Lua integration (independent State for thread safety)
@@ -122,6 +135,19 @@ private:
     std::atomic<bool> running_{false};
     std::atomic<bool> infer_enabled_{true};  // Inference enable/disable control
     std::unique_ptr<lua_cv::WebSocketTransport> ws_;
+
+#ifdef USE_CVI_MPI
+    // H.264 hardware encoder (for video preview)
+    std::unique_ptr<lua_cv::VencEncoder> encoder_;
+    std::thread h264_encode_thread_;
+    std::atomic<bool> h264_running_{false};
+    bool h264_bound_to_vpss_ = false;
+    int h264_bound_vpss_grp_ = -1;
+    int h264_bound_vpss_chn_ = -1;
+    std::atomic<bool> venc_initialized_{false};  // Track if VENC is properly initialized
+    uint32_t venc_actual_width_ = 0;   // Actual VENC resolution (may differ from config)
+    uint32_t venc_actual_height_ = 0;
+#endif
 
     // Upstream camera reference (for timing feedback)
     CameraNode* upstream_camera_ = nullptr;

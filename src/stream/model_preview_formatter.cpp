@@ -140,4 +140,48 @@ nlohmann::json build_model_preview_message(
     return {{"data", std::move(preview_data)}};
 }
 
+#ifdef USE_CVI_MPI
+nlohmann::json build_model_preview_message(
+    const nlohmann::json& event_data,
+    const lua_cv::VencEncoder::EncodedStream& stream,
+    const ModelPreviewFormatConfig& config,
+    std::chrono::steady_clock::time_point* last_preview_time,
+    int* preview_interval_ms) {
+    nlohmann::json preview_data = nlohmann::json::object();
+    populate_preview_boxes(event_data, &preview_data);
+
+    int frame_width = config.preview_width > 0 ? config.preview_width : event_data.value("frame_width", 0);
+    int frame_height = config.preview_height > 0 ? config.preview_height : event_data.value("frame_height", 0);
+    preview_data["resolution"] = {frame_width, frame_height};
+
+    try {
+        if (preview_interval_ms) {
+            *preview_interval_ms = 1000 / config.preview_fps;
+        }
+
+        auto now_tp = std::chrono::steady_clock::now();
+        auto elapsed = last_preview_time
+            ? std::chrono::duration_cast<std::chrono::milliseconds>(now_tp - *last_preview_time).count()
+            : 0;
+
+        if (!last_preview_time || elapsed >= (preview_interval_ms ? *preview_interval_ms : 0)) {
+            if (last_preview_time) {
+                *last_preview_time = now_tp;
+            }
+            if (!stream.data.empty()) {
+                preview_data["image"] = base64_encode(stream.data.data(), stream.data.size());
+            } else {
+                preview_data["image"] = "";
+            }
+        } else {
+            preview_data["image"] = "";
+        }
+    } catch (...) {
+        preview_data["image"] = "";
+    }
+
+    return {{"data", std::move(preview_data)}};
+}
+#endif
+
 }  // namespace node

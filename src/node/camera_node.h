@@ -55,6 +55,7 @@ public:
     bool frame_skip_enabled() const { return config_.infer_fps_limit > 0.0; }
     double infer_fps_limit() const { return config_.infer_fps_limit; }
     bool get_stream_binding(int* vpss_grp, int* vpss_chn) const;
+    bool get_infer_binding(int* vpss_grp, int* vpss_chn) const;
 
     // Configuration access (for ModelNode coordinate mapping)
     int config_width() const { return config_.width; }

@@ -6,6 +6,10 @@
 
 #include <nlohmann/json.hpp>
 
+#ifdef USE_CVI_MPI
+#include "stream/venc_encoder.h"
+#endif
+
 namespace node {
 
 struct ModelPreviewFormatConfig {
@@ -21,5 +25,14 @@ nlohmann::json build_model_preview_message(
     const ModelPreviewFormatConfig& config,
     std::chrono::steady_clock::time_point* last_preview_time,
     int* preview_interval_ms);
+
+#ifdef USE_CVI_MPI
+nlohmann::json build_model_preview_message(
+    const nlohmann::json& event_data,
+    const lua_cv::VencEncoder::EncodedStream& stream,
+    const ModelPreviewFormatConfig& config,
+    std::chrono::steady_clock::time_point* last_preview_time,
+    int* preview_interval_ms);
+#endif
 
 }  // namespace node

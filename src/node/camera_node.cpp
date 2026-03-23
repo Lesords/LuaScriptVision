@@ -329,6 +329,24 @@ bool CameraNode::get_stream_binding(int* vpss_grp, int* vpss_chn) const {
 #endif
 }
 
+bool CameraNode::get_infer_binding(int* vpss_grp, int* vpss_chn) const {
+    if (!vpss_grp || !vpss_chn) {
+        return false;
+    }
+#ifdef USE_CVI_CAMERA
+    if (!camera_) {
+        return false;
+    }
+    *vpss_grp = camera_->vpss_group();
+    *vpss_chn = camera_->vpss_infer_channel();
+    return *vpss_grp >= 0 && *vpss_chn >= 0;
+#else
+    (void)vpss_grp;
+    (void)vpss_chn;
+    return false;
+#endif
+}
+
 void CameraNode::captureLoop() {
     while (running_.load(std::memory_order_acquire)) {
 #ifdef USE_CVI_CAMERA
