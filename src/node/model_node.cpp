@@ -17,10 +17,6 @@
 #include "inference/layout.h"
 #include "modules/cv/mmf_context.h"
 
-#ifdef USE_CVI_MPI
-#include "stream/venc_encoder.h"
-#endif
-
 #include <cstdlib>
 #include <iostream>
 #include <unistd.h>
@@ -123,30 +119,30 @@ int ModelNode::parseConfig(const nlohmann::json& config) {
 
     parsePreviewConfig(config);
 
-    config_.h264_preview = true;
-    config_.h264_bitrate_kbps = 2000;
-    config_.h264_gop = 30;
-
     return MA_OK;
 }
 
 void ModelNode::parsePreviewConfig(const nlohmann::json& config) {
     std::string preview_resolution_key = "previewResolution";
 
-    config_.preview_resolution = config[preview_resolution_key].get<std::string>();
-    if (parse_preview_resolution(config_.preview_resolution, &config_.preview_width, &config_.preview_height)) {
-        std::cout << "[ModelNode] Preview resolution: " << config_.preview_width
-                  << "x" << config_.preview_height << std::endl;
-    } else {
-        std::cerr << "[ModelNode] Invalid preview_resolution format (expected WIDTHxHEIGHT), using original size" << std::endl;
-        config_.preview_width = 0;
-        config_.preview_height = 0;
+    if (config.contains(preview_resolution_key) && config[preview_resolution_key].is_string()) {
+        config_.preview_resolution = config[preview_resolution_key].get<std::string>();
+        if (parse_preview_resolution(config_.preview_resolution, &config_.preview_width, &config_.preview_height)) {
+            std::cout << "[ModelNode] Preview resolution: " << config_.preview_width
+                      << "x" << config_.preview_height << std::endl;
+        } else {
+            std::cerr << "[ModelNode] Invalid preview_resolution format (expected WIDTHxHEIGHT), using original size" << std::endl;
+            config_.preview_width = 0;
+            config_.preview_height = 0;
+        }
     }
 
-    config_.preview_fps = config["previewFps"].get<int>();
-    if (config_.preview_fps <= 0 || config_.preview_fps > 30) {
-        std::cerr << "[ModelNode] Invalid preview_fps, using default 15" << std::endl;
-        config_.preview_fps = 15;
+    if (config.contains("previewFps") && config["previewFps"].is_number()) {
+        config_.preview_fps = config["previewFps"].get<int>();
+        if (config_.preview_fps <= 0 || config_.preview_fps > 30) {
+            std::cerr << "[ModelNode] Invalid preview_fps, using default 15" << std::endl;
+            config_.preview_fps = 15;
+        }
     }
 }
 
@@ -315,10 +311,14 @@ int ModelNode::onStart() {
         bindUpstreamCamera();
     }
 
-    // If this node will broadcast a preview (WebSocket), request full-resolution
-    // STREAM frames from the upstream camera so preview quality is maximized.
+    // Request full-resolution STREAM frames for preview (used as WebSocket preview source)
     if (upstream_camera_ && config_.websocket) {
         upstream_camera_->set_deliver_stream_frame(true);
+        std::cout << "[ModelNode] stream_frame delivery enabled on camera " << camera_id << std::endl;
+    } else if (!upstream_camera_) {
+        std::cout << "[ModelNode] stream_frame delivery SKIPPED: no upstream camera found" << std::endl;
+    } else {
+        std::cout << "[ModelNode] stream_frame delivery SKIPPED: websocket disabled" << std::endl;
     }
 
     running_.store(true, std::memory_order_release);
@@ -348,40 +348,6 @@ int ModelNode::onStart() {
     // Send enabled event to notify frontend of initial state
     event("enabled", MA_OK, infer_enabled_.load(std::memory_order_acquire));
 
-#ifdef USE_CVI_MPI
-    int vpss_grp = -1;
-    int vpss_chn = -1;
-    if (upstream_camera_ && !upstream_camera_->get_infer_binding(&vpss_grp, &vpss_chn)) {
-        event("error", MA_EINVAL, {{"message", "Failed to resolve VPSS stream channel"}});
-        return MA_EINVAL;
-    }
-
-    lua_cv::VencEncoder::Config enc_cfg;
-    enc_cfg.width = static_cast<uint32_t>(config_.preview_width);
-    enc_cfg.height = static_cast<uint32_t>(config_.preview_height);
-    enc_cfg.fps = static_cast<uint32_t>(config_.preview_fps);
-    enc_cfg.bitrate_kbps = static_cast<uint32_t>(config_.h264_bitrate_kbps);
-    enc_cfg.gop = static_cast<uint32_t>(config_.h264_gop);
-    enc_cfg.codec = lua_cv::VencEncoder::CodecType::H265;
-
-    encoder_ = std::make_unique<lua_cv::VencEncoder>(enc_cfg);
-    if (!encoder_->init()) {
-        event("error", MA_EIO, {{"message", "VENC encoder init failed"}});
-        encoder_.reset();
-        return MA_EIO;
-    }
-
-    if (!encoder_->bind_to_vpss(static_cast<VPSS_GRP>(vpss_grp),
-                                static_cast<VPSS_CHN>(vpss_chn))) {
-        event("error", MA_EIO, {{"message", "Failed to bind VPSS to VENC"}});
-        encoder_->shutdown();
-        encoder_.reset();
-        return MA_EIO;
-    }
-
-    h264_encode_thread_ = std::thread(&ModelNode::h264EncodeLoop, this);
-#endif
-
     return MA_OK;
 }
 
@@ -396,32 +362,6 @@ int ModelNode::onStop() {
     if (infer_thread_.joinable()) {
         infer_thread_.join();
     }
-
-#ifdef USE_CVI_MPI
-    // Stop H.264 encoder
-    if (config_.h264_preview) {
-        h264_running_.store(false, std::memory_order_release);
-        h264_bound_to_vpss_ = false;
-        h264_bound_vpss_grp_ = -1;
-        h264_bound_vpss_chn_ = -1;
-        venc_initialized_.store(false, std::memory_order_release);
-        venc_actual_width_ = 0;
-        venc_actual_height_ = 0;
-
-        if (h264_encode_thread_.joinable()) {
-            h264_encode_thread_.join();
-        }
-
-        if (encoder_) {
-            encoder_->shutdown();
-            encoder_.reset();
-        }
-
-        if (config_.debug) {
-            std::cout << "[ModelNode] H.264 encoder stopped" << std::endl;
-        }
-    }
-#endif
 
     if (ws_) {
         ws_->stop();
@@ -458,12 +398,19 @@ int ModelNode::onControl(const std::string& action, const nlohmann::json& data) 
     }
 
     if (action == "get_stats") {
+        uint64_t sf_count = stream_frame_count_.load();
+        uint64_t if_count = infer_frame_count_.load();
+        uint64_t total = sf_count + if_count;
         response("get_stats", MA_OK, {
             {"infer_count", infer_count_.load()},
             {"error_count", error_count_.load()},
             {"infer_ema_ms", infer_ema_ms_},
             {"ws_event_count", ws_event_count_.load()},
-            {"ws_clients", ws_ ? ws_->client_count() : 0}
+            {"ws_clients", ws_ ? ws_->client_count() : 0},
+            {"stream_frame_count", sf_count},
+            {"infer_frame_fallback_count", if_count},
+            {"stream_frame_ratio", total > 0 ? static_cast<double>(sf_count) / total : 0.0},
+            {"stream_frame_active", sf_count > 0}
         });
         return MA_OK;
     }
@@ -505,6 +452,18 @@ void ModelNode::maybeBroadcastPreview(const PipelineContext& ctx, const nlohmann
         const lua_cv::Frame& preview_frame =
             ctx.has_stream_frame() ? ctx.stream_frame->frame() : ctx.frame->frame();
 
+        if (ctx.has_stream_frame()) {
+            uint64_t cnt = stream_frame_count_.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (cnt == 1) {
+                std::cout << "[ModelNode] First stream_frame received (full-res preview active)" << std::endl;
+            }
+        } else {
+            uint64_t cnt = infer_frame_count_.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (cnt == 1) {
+                std::cout << "[ModelNode] WARN: stream_frame not available, using infer frame for preview" << std::endl;
+            }
+        }
+
         ModelPreviewFormatConfig preview_config;
         preview_config.preview_width = config_.preview_width;
         preview_config.preview_height = config_.preview_height;
@@ -533,6 +492,19 @@ void ModelNode::inferLoop() {
         if (!inbox_.fetch(&ctx, 100)) {
             // Timeout or interrupted
             continue;
+        }
+
+        // Lazy camera binding: camera may have been added to dependencies_ AFTER onStart()
+        // (Node-RED creates model before camera). By the time we receive the first frame,
+        // camera is guaranteed to be in dependencies_ (addDependency is called before
+        // setupDataFlow which connected our inbox).
+        if (!upstream_camera_) {
+            bindUpstreamCamera();
+            if (upstream_camera_ && config_.websocket) {
+                upstream_camera_->set_deliver_stream_frame(true);
+                std::cout << "[ModelNode] Lazily enabled stream_frame delivery on camera "
+                          << upstream_camera_->id() << std::endl;
+            }
         }
 
         // When disabled, drain inbox without processing
@@ -570,6 +542,9 @@ void ModelNode::inferLoop() {
             nlohmann::json event_data = build_inference_event_data(std::move(result));
 
             event("invoke", MA_OK, event_data);
+
+            // Broadcast preview: maybeBroadcastPreview uses stream_frame (full-res) from
+            // PipelineContext if available, otherwise falls back to infer frame.
             maybeBroadcastPreview(*ctx, event_data);
 
             // Forward to downstream
@@ -797,57 +772,5 @@ void ModelNode::cleanupLuaRef() {
         L_ = nullptr;
     }
 }
-
-#ifdef USE_CVI_MPI
-
-void ModelNode::h264EncodeLoop() {
-    uint64_t frame_count = 0;
-    auto start_time = std::chrono::steady_clock::now();
-
-    while (h264_running_.load(std::memory_order_acquire)) {
-        if (!encoder_) {
-            break;
-        }
-
-        // Get encoded H.264 stream from VENC
-        lua_cv::VencEncoder::EncodedStream stream;
-        if (!encoder_->get_stream(&stream, 100)) {
-            continue;
-        }
-
-        // Check if we're still running after get_stream
-        if (!h264_running_.load(std::memory_order_acquire)) {
-            encoder_->release_stream();
-            break;
-        }
-
-        // Broadcast H.264 data via WebSocket
-        // if (ws_ && stream.data.size() > 0) {
-        //     ws_->broadcast_binary(stream.data.data(), stream.data.size());
-        //     frame_count++;
-        // }
-
-        nlohmann::json event_data;
-        ModelPreviewFormatConfig preview_config;
-        preview_config.preview_width = config_.preview_width;
-        preview_config.preview_height = config_.preview_height;
-        preview_config.preview_fps = config_.preview_fps;
-
-        nlohmann::json ws_msg = build_model_preview_message(
-            event_data,
-            stream,
-            preview_config,
-            &last_preview_time_,
-            &preview_interval_ms_);
-        std::string payload = ws_msg.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
-        if (ws_->broadcast_binary(reinterpret_cast<const uint8_t*>(payload.c_str()), payload.size())) {
-            ws_event_count_.fetch_add(1, std::memory_order_relaxed);
-        }
-
-        encoder_->release_stream();
-    }
-}
-
-#endif
 
 } // namespace node

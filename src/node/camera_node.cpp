@@ -410,15 +410,23 @@ bool CameraNode::processFrame(lua_cv::Frame& frame) {
     sf->set_frame_id(frame_id);
 
     // Optionally capture STREAM channel (full-res) frame alongside INFER frame.
-    // This uses a non-blocking read so it never blocks the capture loop.
+    // Use a short timeout to tolerate momentary VPSS buffer delays without
+    // blocking the capture loop for too long.
     SharedFrame* stream_sf = nullptr;
 #ifdef USE_CVI_CAMERA
     if (deliver_stream_frame_.load(std::memory_order_acquire) && camera_) {
         lua_cv::Frame stream_frame;
-        if (camera_->read_stream(stream_frame, 0)) {
+        if (camera_->read_stream(stream_frame, 10)) {  // 10ms: tolerate brief VPSS delay
             stream_sf = new SharedFrame(std::move(stream_frame));
             stream_sf->set_timestamp(sf->timestamp());
             stream_sf->set_frame_id(frame_id);
+        } else {
+            static std::atomic<uint32_t> stream_fail_count{0};
+            uint32_t cnt = stream_fail_count.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (cnt == 1 || cnt % 300 == 0) {
+                std::cerr << "[CameraNode] WARN: read_stream(Chn0) failed"
+                          << " (count=" << cnt << "), stream_frame will be null for this frame" << std::endl;
+            }
         }
     }
 #endif
