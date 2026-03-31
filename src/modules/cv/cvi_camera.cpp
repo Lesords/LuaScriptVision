@@ -1436,6 +1436,22 @@ bool CviCamera::init_vpss() {
         vpss_chn_ = vpss_stream_chn_;
     }
 
+    // Chn2: preview channel for JPEG encoding (VPSS → VENC MJPEG in model_node).
+    // Failure is non-fatal — preview will simply be unavailable.
+    {
+        uint32_t prev_w = MmfContext::camera_preview_width();
+        uint32_t prev_h = MmfContext::camera_preview_height();
+        PixelFormat prev_fmt = MmfContext::camera_preview_format();
+        uint32_t prev_depth = MmfContext::camera_preview_depth();
+        if (!setup_channel(vpss_preview_chn_, prev_w, prev_h, prev_fmt,
+                           prev_depth, VB_INVALID_POOLID, "camera_preview",
+                           &vpss_preview_pool_, &vpss_preview_chn_enabled_,
+                           &vpss_preview_pool_attached_)) {
+            std::cerr << "[WARN] CviCamera: preview channel (Chn"
+                      << vpss_preview_chn_ << ") setup failed, JPEG preview disabled" << std::endl;
+        }
+    }
+
     if (!check_rc(CVI_VPSS_StartGrp(vpss_grp_), "CVI_VPSS_StartGrp")) {
         return false;
     }
@@ -1498,11 +1514,10 @@ void CviCamera::cleanup() {
         vpss_stream_pool_attached_ = false;
         vpss_stream_pool_ = VB_INVALID_POOLID;
     }
-
-    if (vi_pool_attached_) {
-        CVI_VI_DetachVbPool(vi_pipe_, vi_chn_);
-        vi_pool_attached_ = false;
-        vi_pool_ = VB_INVALID_POOLID;
+    if (vpss_preview_pool_attached_) {
+        CVI_VPSS_DetachVbPool(vpss_grp_, vpss_preview_chn_);
+        vpss_preview_pool_attached_ = false;
+        vpss_preview_pool_ = VB_INVALID_POOLID;
     }
 
     if (vpss_chn_enabled_) {
@@ -1512,6 +1527,10 @@ void CviCamera::cleanup() {
     if (vpss_stream_chn_enabled_) {
         CVI_VPSS_DisableChn(vpss_grp_, vpss_stream_chn_);
         vpss_stream_chn_enabled_ = false;
+    }
+    if (vpss_preview_chn_enabled_) {
+        CVI_VPSS_DisableChn(vpss_grp_, vpss_preview_chn_);
+        vpss_preview_chn_enabled_ = false;
     }
     if (vpss_started_) {
         CVI_VPSS_StopGrp(vpss_grp_);

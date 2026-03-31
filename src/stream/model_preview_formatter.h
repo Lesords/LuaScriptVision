@@ -3,6 +3,8 @@
 #include "modules/cv/frame.h"
 
 #include <chrono>
+#include <cstdint>
+#include <string>
 
 #include <nlohmann/json.hpp>
 
@@ -18,6 +20,14 @@ struct ModelPreviewFormatConfig {
     int preview_fps = 15;
     int jpeg_quality = 75;
 };
+
+// Encode raw bytes to base64 string (used for JPEG preview payload)
+std::string base64_encode_stream(const uint8_t* data, size_t len);
+
+// Build preview JSON payload from pre-encoded base64 JPEG + inference boxes
+nlohmann::json build_preview_json(const nlohmann::json& event_data,
+                                  const std::string& base64_jpeg,
+                                  uint32_t width, uint32_t height);
 
 nlohmann::json build_model_preview_message(
     const nlohmann::json& event_data,

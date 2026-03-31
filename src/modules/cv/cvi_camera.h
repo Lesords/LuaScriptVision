@@ -55,6 +55,8 @@ public:
     int vpss_group() const { return static_cast<int>(vpss_grp_); }
     int vpss_stream_channel() const { return static_cast<int>(vpss_stream_chn_); }
     int vpss_infer_channel() const { return static_cast<int>(vpss_chn_); }
+    int vpss_preview_channel() const { return static_cast<int>(vpss_preview_chn_); }
+    bool vpss_preview_enabled() const { return vpss_preview_chn_enabled_; }
 
 private:
     bool read_internal(Frame& frame, int timeout_ms, bool log_error);
@@ -89,6 +91,7 @@ private:
     bool vpss_started_ = false;
     bool vpss_chn_enabled_ = false;
     bool vpss_stream_chn_enabled_ = false;
+    bool vpss_preview_chn_enabled_ = false;  // Chn2: preview channel for JPEG encoding
     bool vi_vpss_bound_ = false;
     bool isp_inited_ = false;
     bool isp_thread_running_ = false;
@@ -99,6 +102,7 @@ private:
     VPSS_GRP vpss_grp_ = 0;
     VPSS_CHN vpss_chn_ = 0;
     VPSS_CHN vpss_stream_chn_ = 0;
+    VPSS_CHN vpss_preview_chn_ = 2;  // Chn2: downscaled NV21 → model_node JPEG preview
     VI_DEV vi_dev_ = 0;
     VI_PIPE vi_pipe_ = 0;
     VI_CHN vi_chn_ = 0;
@@ -109,6 +113,8 @@ private:
     bool vpss_pool_attached_ = false;
     VB_POOL vpss_stream_pool_ = VB_INVALID_POOLID;
     bool vpss_stream_pool_attached_ = false;
+    VB_POOL vpss_preview_pool_ = VB_INVALID_POOLID;
+    bool vpss_preview_pool_attached_ = false;
     CVI_S32 last_error_ = CVI_SUCCESS;
 
     pthread_t isp_thread_{};

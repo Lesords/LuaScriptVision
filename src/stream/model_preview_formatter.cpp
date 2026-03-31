@@ -102,6 +102,22 @@ std::string encode_preview_image(const lua_cv::Frame& frame,
 
 }  // namespace
 
+// Public: encode raw bytes to base64 (for hardware-encoded JPEG preview)
+std::string base64_encode_stream(const uint8_t* data, size_t len) {
+    return base64_encode(data, len);
+}
+
+// Public: build preview JSON from pre-encoded base64 JPEG + inference boxes
+nlohmann::json build_preview_json(const nlohmann::json& event_data,
+                                  const std::string& base64_jpeg,
+                                  uint32_t width, uint32_t height) {
+    nlohmann::json preview_data = nlohmann::json::object();
+    populate_preview_boxes(event_data, &preview_data);
+    preview_data["resolution"] = {width, height};
+    preview_data["image"] = base64_jpeg;
+    return preview_data;
+}
+
 nlohmann::json build_model_preview_message(
     const nlohmann::json& event_data,
     const lua_cv::Frame& frame,

@@ -1,9 +1,8 @@
 #pragma once
 
 #include "data_node.h"
-#include "message_box.h"
-#include "node_factory.h"
 #include "shared_frame.h"
+#include "node_factory.h"
 
 #include <array>
 #include <atomic>
@@ -61,11 +60,6 @@ public:
     // Returns nullptr if no stream frame is available yet.
     SharedFrame* grab_latest_stream_frame();
 
-    // Preview subscriber registration: camera pushes SharedFrame* to all registered
-    // inboxes on every new stream frame capture, independent of inference state.
-    void register_preview_subscriber(MessageBox<SharedFrame>* inbox);
-    void unregister_preview_subscriber(MessageBox<SharedFrame>* inbox);
-
     // Downstream timing feedback (called by ModelNode)
     void report_proc_time(const std::string& node_id, double proc_ms);
     void stopCapture();
@@ -78,6 +72,7 @@ public:
     double infer_fps_limit() const { return config_.infer_fps_limit; }
     bool get_stream_binding(int* vpss_grp, int* vpss_chn) const;
     bool get_infer_binding(int* vpss_grp, int* vpss_chn) const;
+    bool get_preview_binding(int* vpss_grp, int* vpss_chn) const;  // Chn2 → VENC MJPEG
 
     // Configuration access (for ModelNode coordinate mapping)
     int config_width() const { return config_.width; }
@@ -155,13 +150,8 @@ private:
     std::atomic<bool> deliver_stream_frame_{false};
 
     // Latest full-resolution STREAM frame (Chn0), updated independently of infer channel.
-    // ModelNode grabs this via grab_latest_stream_frame() after inference completes.
     SharedFrame* latest_stream_sf_ = nullptr;
     mutable std::mutex latest_stream_mutex_;
-
-    // Preview subscribers: camera pushes new stream frames to these inboxes directly.
-    std::vector<MessageBox<SharedFrame>*> preview_subscribers_;
-    mutable std::mutex preview_sub_mutex_;
 
     // Statistics
     std::atomic<uint64_t> frame_count_{0};

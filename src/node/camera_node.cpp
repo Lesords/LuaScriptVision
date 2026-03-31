@@ -351,12 +351,30 @@ bool CameraNode::get_infer_binding(int* vpss_grp, int* vpss_chn) const {
 #endif
 }
 
+bool CameraNode::get_preview_binding(int* vpss_grp, int* vpss_chn) const {
+    if (!vpss_grp || !vpss_chn) {
+        return false;
+    }
+#ifdef USE_CVI_CAMERA
+    if (!camera_ || !camera_->vpss_preview_enabled()) {
+        return false;
+    }
+    *vpss_grp = camera_->vpss_group();
+    *vpss_chn = camera_->vpss_preview_channel();
+    return *vpss_grp >= 0 && *vpss_chn >= 0;
+#else
+    (void)vpss_grp;
+    (void)vpss_chn;
+    return false;
+#endif
+}
+
 void CameraNode::captureLoop() {
     while (running_.load(std::memory_order_acquire)) {
 #ifdef USE_CVI_CAMERA
-        // === STREAM Channel: always capture into shared memory (latest_stream_sf_) ===
-        // Any downstream node can call grab_latest_stream_frame() to get the latest
-        // full-resolution NV21 frame without gating on deliver_stream_frame_.
+        // === STREAM Channel: capture into shared memory (latest_stream_sf_) ===
+        // grab_latest_stream_frame() allows any node to get the latest full-resolution
+        // NV21 frame. Hardware JPEG preview (VPSS Chn2 → VENC) runs independently.
         if (camera_) {
             lua_cv::Frame stream_frame;
             if (captureStreamFrame(stream_frame)) {
@@ -365,23 +383,9 @@ void CameraNode::captureLoop() {
                     std::chrono::duration_cast<std::chrono::microseconds>(
                         std::chrono::steady_clock::now().time_since_epoch()).count()));
 
-                // Update shared latest frame
-                {
-                    std::lock_guard<std::mutex> lock(latest_stream_mutex_);
-                    if (latest_stream_sf_) latest_stream_sf_->release();
-                    latest_stream_sf_ = new_sf;  // holds initial ref (ref_count=1)
-                }
-
-                // Push to all registered preview subscribers (ref per subscriber)
-                {
-                    std::lock_guard<std::mutex> lock(preview_sub_mutex_);
-                    for (auto* inbox : preview_subscribers_) {
-                        new_sf->ref();
-                        if (!inbox->post(new_sf, 0)) {
-                            new_sf->release();  // inbox full, drop frame
-                        }
-                    }
-                }
+                std::lock_guard<std::mutex> lock(latest_stream_mutex_);
+                if (latest_stream_sf_) latest_stream_sf_->release();
+                latest_stream_sf_ = new_sf;
             }
         }
 
@@ -637,26 +641,6 @@ SharedFrame* CameraNode::grab_latest_stream_frame() {
     if (!latest_stream_sf_) return nullptr;
     latest_stream_sf_->ref();  // caller owns this reference; must call release()
     return latest_stream_sf_;
-}
-
-void CameraNode::register_preview_subscriber(MessageBox<SharedFrame>* inbox) {
-    if (!inbox) return;
-    std::lock_guard<std::mutex> lock(preview_sub_mutex_);
-    for (auto* existing : preview_subscribers_) {
-        if (existing == inbox) return;  // already registered
-    }
-    preview_subscribers_.push_back(inbox);
-    std::cout << "[CameraNode] Preview subscriber registered (total=" << preview_subscribers_.size() << ")" << std::endl;
-}
-
-void CameraNode::unregister_preview_subscriber(MessageBox<SharedFrame>* inbox) {
-    if (!inbox) return;
-    std::lock_guard<std::mutex> lock(preview_sub_mutex_);
-    auto it = std::find(preview_subscribers_.begin(), preview_subscribers_.end(), inbox);
-    if (it != preview_subscribers_.end()) {
-        preview_subscribers_.erase(it);
-        std::cout << "[CameraNode] Preview subscriber unregistered (total=" << preview_subscribers_.size() << ")" << std::endl;
-    }
 }
 
 int CameraNode::computeNobufThreshold() const {

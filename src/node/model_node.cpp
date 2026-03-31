@@ -313,13 +313,45 @@ int ModelNode::onStart() {
         bindUpstreamCamera();
     }
 
-    // Register preview_inbox_ with camera so it receives stream frames directly.
-    // If camera isn't ready yet, previewLoop will handle lazy registration.
+    // Create hardware JPEG encoder (MJPEG VENC Ch1) and bind to VPSS Chn2.
+    // Requires camera to be started and preview channel (Chn2) to be available.
+#ifdef USE_CVI_MPI
     if (upstream_camera_ && config_.websocket) {
-        upstream_camera_->register_preview_subscriber(&preview_inbox_);
-        preview_registered_ = true;
-        std::cout << "[ModelNode] Registered preview with camera " << camera_id << std::endl;
+        int vpss_grp = -1, vpss_chn = -1;
+        if (upstream_camera_->get_preview_binding(&vpss_grp, &vpss_chn)) {
+            lua_cv::VencEncoder::Config enc_cfg;
+            enc_cfg.codec   = lua_cv::VencEncoder::CodecType::MJPEG;
+            enc_cfg.channel = static_cast<VENC_CHN>(preview_venc_channel_);
+            enc_cfg.width   = lua_cv::MmfContext::camera_preview_width();
+            enc_cfg.height  = lua_cv::MmfContext::camera_preview_height();
+            enc_cfg.fps     = static_cast<uint32_t>(config_.preview_fps);
+            enc_cfg.bitrate_kbps = 2000;  // 2Mbps sufficient for 640×360 MJPEG
+            jpeg_encoder_ = std::make_unique<lua_cv::VencEncoder>(enc_cfg);
+            if (jpeg_encoder_->init()) {
+                if (jpeg_encoder_->bind_to_vpss(static_cast<VPSS_GRP>(vpss_grp),
+                                                static_cast<VPSS_CHN>(vpss_chn))) {
+                    std::cout << "[ModelNode] JPEG encoder bound to VPSS["
+                              << vpss_grp << "," << vpss_chn << "] ch="
+                              << preview_venc_channel_ << std::endl;
+                    event("websocket", MA_OK, {
+                        {"port", config_.ws_port},
+                        {"path", config_.ws_path},
+                        {"type", "jpeg"}
+                    });
+                } else {
+                    std::cerr << "[ModelNode] JPEG encoder bind_to_vpss failed" << std::endl;
+                    jpeg_encoder_->shutdown();
+                    jpeg_encoder_.reset();
+                }
+            } else {
+                std::cerr << "[ModelNode] JPEG encoder init failed" << std::endl;
+                jpeg_encoder_.reset();
+            }
+        } else {
+            std::cerr << "[ModelNode] No preview binding available (camera Chn2 not ready)" << std::endl;
+        }
     }
+#endif
 
     running_.store(true, std::memory_order_release);
 
@@ -345,9 +377,7 @@ int ModelNode::onStart() {
 
     // infer_thread_ = std::thread(&ModelNode::inferLoop, this);
 
-    // Start preview thread: directly receives SharedFrame* pushed by camera_node.
-    // Runs independently of inference state.
-    preview_inbox_.reset();
+    // Start preview thread (polls JPEG encoder for frames, independent of inference)
     preview_running_.store(true, std::memory_order_release);
     preview_thread_ = std::thread(&ModelNode::previewLoop, this);
     std::cout << "[ModelNode] Preview thread started at " << config_.preview_fps << "fps" << std::endl;
@@ -370,19 +400,19 @@ int ModelNode::onStop() {
         infer_thread_.join();
     }
 
-    // Unregister preview from camera BEFORE stopping preview thread
-    if (upstream_camera_ && preview_registered_) {
-        upstream_camera_->unregister_preview_subscriber(&preview_inbox_);
-        preview_registered_ = false;
-    }
-
     // Stop preview thread
     preview_running_.store(false, std::memory_order_release);
-    preview_inbox_.interrupt();
     if (preview_thread_.joinable()) {
         preview_thread_.join();
     }
-    preview_inbox_.clear();  // deleter releases any remaining SharedFrame* refs
+
+    // Shutdown hardware JPEG encoder (unbinds from VPSS automatically)
+#ifdef USE_CVI_MPI
+    if (jpeg_encoder_) {
+        jpeg_encoder_->shutdown();
+        jpeg_encoder_.reset();
+    }
+#endif
 
     if (ws_) {
         ws_->stop();
@@ -780,45 +810,117 @@ void ModelNode::cleanupLuaRef() {
 }
 
 void ModelNode::previewLoop() {
+#ifdef USE_CVI_MPI
+    // Hardware path: poll VPSS Chn2 → VENC MJPEG Ch1
+    // VENC receives frames automatically via hardware binding (no CPU color conversion).
     while (preview_running_.load(std::memory_order_acquire)) {
-        // Lazy camera registration: handles the case where camera is created AFTER model.
-        // NodeFactory is a singleton accessible globally.
-        if (!upstream_camera_ || !preview_registered_) {
-            if (!upstream_camera_) {
-                bindUpstreamCamera();
-                if (!upstream_camera_) {
-                    // camera not in dependencies_, scan all nodes
-                    upstream_camera_ = NodeFactory::instance().find_camera_node();
+        if (!jpeg_encoder_ || !jpeg_encoder_->is_initialized()) {
+            // Lazy init: model_node may start before camera_node.
+            // Poll until camera is ready, then create and bind JPEG encoder.
+            if (!jpeg_encoder_ && !jpeg_encoder_init_failed_ && config_.websocket) {
+                CameraNode* cam = nullptr;
+                if (upstream_camera_) {
+                    cam = upstream_camera_;
+                } else {
+                    cam = NodeFactory::instance().find_camera_node();
+                    if (cam) upstream_camera_ = cam;
+                }
+                if (cam) {
+                    int vpss_grp = -1, vpss_chn = -1;
+                    if (cam->get_preview_binding(&vpss_grp, &vpss_chn)) {
+                        lua_cv::VencEncoder::Config enc_cfg;
+                        enc_cfg.codec        = lua_cv::VencEncoder::CodecType::MJPEG;
+                        enc_cfg.channel      = static_cast<VENC_CHN>(preview_venc_channel_);
+                        // Use VPSS Chn2 physical output dimensions, NOT the user's preview_width/height
+                        // (which is the frontend display resolution, not the hardware encoder size).
+                        enc_cfg.width        = lua_cv::MmfContext::camera_preview_width();
+                        enc_cfg.height       = lua_cv::MmfContext::camera_preview_height();
+                        enc_cfg.fps          = static_cast<uint32_t>(config_.preview_fps);
+                        enc_cfg.bitrate_kbps = 2000;
+                        jpeg_encoder_ = std::make_unique<lua_cv::VencEncoder>(enc_cfg);
+                        if (jpeg_encoder_->init()) {
+                            if (jpeg_encoder_->bind_to_vpss(static_cast<VPSS_GRP>(vpss_grp),
+                                                            static_cast<VPSS_CHN>(vpss_chn))) {
+                                std::cout << "[ModelNode] JPEG encoder lazy-init bound to VPSS["
+                                          << vpss_grp << "," << vpss_chn << "] ch="
+                                          << preview_venc_channel_ << std::endl;
+                                event("websocket", MA_OK, {
+                                    {"port", config_.ws_port},
+                                    {"path", config_.ws_path},
+                                    {"type", "jpeg"}
+                                });
+                            } else {
+                                std::cerr << "[ModelNode] JPEG encoder lazy bind_to_vpss failed" << std::endl;
+                                jpeg_encoder_->shutdown();
+                                jpeg_encoder_.reset();
+                                jpeg_encoder_init_failed_ = true;
+                            }
+                        } else {
+                            std::cerr << "[ModelNode] JPEG encoder lazy init failed" << std::endl;
+                            jpeg_encoder_.reset();
+                            jpeg_encoder_init_failed_ = true;
+                        }
+                    }
                 }
             }
-            if (upstream_camera_ && !preview_registered_ && config_.websocket) {
-                upstream_camera_->register_preview_subscriber(&preview_inbox_);
-                preview_registered_ = true;
-                std::cout << "[ModelNode] Lazily registered preview with camera "
-                          << upstream_camera_->id() << std::endl;
-            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            continue;
         }
 
-        SharedFrame* sf = nullptr;
-        if (!preview_inbox_.fetch(&sf, 100)) {
+        lua_cv::VencEncoder::EncodedStream stream;
+        if (!jpeg_encoder_->get_stream(&stream, 50)) {
+            continue;
+        }
+
+        if (stream.data.empty()) {
+            jpeg_encoder_->release_stream();
             continue;
         }
 
         if (!preview_running_.load(std::memory_order_acquire)) {
-            if (sf) sf->release();
+            jpeg_encoder_->release_stream();
             break;
         }
 
-        if (sf) {
-            nlohmann::json event_data;
-            {
-                std::lock_guard<std::mutex> lock(infer_result_mutex_);
-                event_data = latest_infer_result_;
+        // FPS throttle
+        auto now = std::chrono::steady_clock::now();
+        if (last_preview_time_ != std::chrono::steady_clock::time_point{}) {
+            auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - last_preview_time_).count();
+            if (elapsed_ms < preview_interval_ms_) {
+                jpeg_encoder_->release_stream();
+                continue;
             }
-            maybeBroadcastPreview(sf->frame(), event_data);
-            sf->release();
+        }
+        last_preview_time_ = now;
+
+        // base64-encode raw JPEG bytes directly — no OpenCV needed
+        std::string b64 = base64_encode_stream(stream.data.data(), stream.data.size());
+        jpeg_encoder_->release_stream();
+
+        if (!ws_ || b64.empty()) continue;
+
+        // Overlay latest inference result boxes if available
+        nlohmann::json event_data;
+        { std::lock_guard<std::mutex> lock(infer_result_mutex_); event_data = latest_infer_result_; }
+
+        nlohmann::json preview_data = build_preview_json(event_data, b64,
+            jpeg_encoder_->config().width, jpeg_encoder_->config().height);
+        std::string payload = nlohmann::json{{"data", preview_data}}
+            .dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+
+        if (ws_->broadcast_binary(
+                reinterpret_cast<const uint8_t*>(payload.c_str()), payload.size())) {
+            stream_frame_count_.fetch_add(1, std::memory_order_relaxed);
+            ws_event_count_.fetch_add(1, std::memory_order_relaxed);
         }
     }
+#else
+    // Non-CVI fallback: sleep (no hardware JPEG encoder)
+    while (preview_running_.load(std::memory_order_acquire)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+#endif
 }
 
 } // namespace node

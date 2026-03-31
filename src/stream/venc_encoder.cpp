@@ -253,11 +253,12 @@ bool VencEncoder::init_mjpeg() {
     chn_attr.stVencAttr.u32MaxPicHeight = config_.height;
     chn_attr.stVencAttr.u32PicWidth = config_.width;
     chn_attr.stVencAttr.u32PicHeight = config_.height;
-    chn_attr.stVencAttr.u32BufSize = config_.width * config_.height * 3 / 2;
+    // JPEG encoder requires bitstream buffer size aligned to 1024 bytes.
+    chn_attr.stVencAttr.u32BufSize = ((config_.width * config_.height * 3 / 2) + 1023U) & ~1023U;
     chn_attr.stVencAttr.bByFrame = CVI_TRUE;
     chn_attr.stVencAttr.bSingleCore = CVI_FALSE;
     chn_attr.stVencAttr.bEsBufQueueEn = CVI_TRUE;
-    chn_attr.stVencAttr.bIsoSendFrmEn = CVI_TRUE;
+    chn_attr.stVencAttr.bIsoSendFrmEn = CVI_FALSE;  // FALSE for VPSS-bound continuous MJPEG
 
     chn_attr.stRcAttr.enRcMode = VENC_RC_MODE_MJPEGCBR;
     chn_attr.stRcAttr.stMjpegCbr.u32BitRate = config_.bitrate_kbps;

@@ -1,12 +1,14 @@
 #pragma once
 
 #include "data_node.h"
-#include "message_box.h"
 #include "model_preprocess_utils.h"
 #include "model_roi_utils.h"
 #include "preprocess_config.h"
 #include "luaref_json.h"
-#include "shared_frame.h"
+
+#ifdef USE_CVI_MPI
+#include "stream/venc_encoder.h"
+#endif
 
 #include <atomic>
 #include <chrono>
@@ -128,20 +130,21 @@ private:
     std::atomic<bool> infer_enabled_{true};
     std::unique_ptr<lua_cv::WebSocketTransport> ws_;
 
-    // Preview thread: receives SharedFrame* directly pushed from camera_node.
-    // camera_node::captureLoop pushes on every new stream frame (independent of inference).
-    MessageBox<SharedFrame> preview_inbox_{1, [](SharedFrame* sf) {
-        if (sf) sf->release();  // auto-release on clear()/interrupt()
-    }};
+    // Preview thread: hardware JPEG via VPSS Chn2 → VENC MJPEG Ch1.
+    // previewLoop polls jpeg_encoder_->get_stream() and broadcasts base64 JPEG over WebSocket.
+#ifdef USE_CVI_MPI
+    std::unique_ptr<lua_cv::VencEncoder> jpeg_encoder_;
+    bool jpeg_encoder_init_failed_ = false;  // prevents infinite retry on permanent failures
+#endif
     std::thread preview_thread_;
     std::atomic<bool> preview_running_{false};
-    bool preview_registered_{false};  // whether preview_inbox_ is registered with camera
+    int preview_venc_channel_ = 1;  // VENC Ch1: reserved for model preview (Ch2=camera H264)
 
     // Latest inference result (mutex-protected): inferLoop writes, previewLoop reads.
     mutable std::mutex infer_result_mutex_;
     nlohmann::json latest_infer_result_;
 
-    // Upstream camera reference (for timing feedback and preview registration)
+    // Upstream camera reference (for timing feedback and preview binding)
     CameraNode* upstream_camera_ = nullptr;
 
     // Statistics

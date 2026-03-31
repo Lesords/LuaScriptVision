@@ -52,6 +52,7 @@ struct MmfPlan {
     std::array<VpssGroupPlan, 2> groups{};
     CameraOutputPlan camera_stream{};
     CameraOutputPlan camera_infer{};
+    CameraOutputPlan camera_preview{};  // Chn2: NV21 downscaled for JPEG preview
     std::array<Resolution, 3> camera_sizes{};
     std::array<Resolution, 3> image_sizes{};
     std::array<VbPoolSpec, 6> vb_pools{};
@@ -66,8 +67,9 @@ const MmfPlan& plan() {
             VpssGroupPlan{0, 1, 1, VpssInputKind::Isp, 1920, 1080},
             VpssGroupPlan{5, 0, 0, VpssInputKind::Mem, 1280, 720},
         },
-        CameraOutputPlan{0, 1920, 1080, PixelFormat::NV21, 3},
-        CameraOutputPlan{1, 640, 640, PixelFormat::RGB, 2},
+        CameraOutputPlan{0, 1920, 1080, PixelFormat::NV21, 3},   // camera_stream: Chn0
+        CameraOutputPlan{1, 640, 640, PixelFormat::RGB, 2},       // camera_infer:  Chn1
+        CameraOutputPlan{2, 640, 360, PixelFormat::NV21, 1},      // camera_preview: Chn2 → VENC MJPEG (depth=1: 1 queued + 1 in VENC = 2 blocks)
         {
             Resolution{1920, 1080},
             Resolution{0, 0},
@@ -79,11 +81,11 @@ const MmfPlan& plan() {
             Resolution{0, 0},
         },
         {
-            VbPoolSpec{1920, 1080, PixelFormat::NV21, 5, true},  // Pool 0: 4→5 (VI pipe needs 5 for CameraCaptureTest)
-            VbPoolSpec{1920, 1080, PixelFormat::NV21, 5, true},  // Pool 1: must keep 5 (stream depth=3, all buffers used)
-            VbPoolSpec{0, 0, PixelFormat::UNKNOWN, 0, true},     // Pool 2: 4→0 (unused NV21 pool, save 2.34 MB)
+            VbPoolSpec{1920, 1080, PixelFormat::NV21, 5, true},  // Pool 0
+            VbPoolSpec{1920, 1080, PixelFormat::NV21, 5, true},  // Pool 1
+            VbPoolSpec{640, 360, PixelFormat::NV21, 2, true},    // Pool 2: preview Chn2 output (depth=1+VENC=2 blocks) ~0.66MB
             VbPoolSpec{640, 640, PixelFormat::RGB_PLANAR, 2, true},
-            VbPoolSpec{640, 640, PixelFormat::RGB, 4, true},     // Pool 4: camera infer output
+            VbPoolSpec{640, 640, PixelFormat::RGB, 3, true},     // Pool 4: infer output (depth=2+process=3 blocks, reduced from 4)
             VbPoolSpec{0, 0, PixelFormat::UNKNOWN, 0, true},
         },
     };
@@ -430,6 +432,26 @@ PixelFormat MmfContext::camera_infer_format() {
 
 uint32_t MmfContext::camera_infer_depth() {
     return plan().camera_infer.depth;
+}
+
+int MmfContext::vpss_channel_for_camera_preview() {
+    return plan().camera_preview.channel;
+}
+
+uint32_t MmfContext::camera_preview_width() {
+    return plan().camera_preview.width;
+}
+
+uint32_t MmfContext::camera_preview_height() {
+    return plan().camera_preview.height;
+}
+
+PixelFormat MmfContext::camera_preview_format() {
+    return plan().camera_preview.format;
+}
+
+uint32_t MmfContext::camera_preview_depth() {
+    return plan().camera_preview.depth;
 }
 
 uint32_t MmfContext::vpss_max_width_for_camera() {

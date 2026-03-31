@@ -75,6 +75,11 @@ public:
     static uint32_t camera_infer_height();
     static PixelFormat camera_infer_format();
     static uint32_t camera_infer_depth();
+    static int vpss_channel_for_camera_preview();
+    static uint32_t camera_preview_width();
+    static uint32_t camera_preview_height();
+    static PixelFormat camera_preview_format();
+    static uint32_t camera_preview_depth();
     static uint32_t vpss_max_width_for_camera();
     static uint32_t vpss_max_height_for_camera();
     static uint32_t vpss_max_width_for_mem();
