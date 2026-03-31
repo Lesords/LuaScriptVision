@@ -27,6 +27,8 @@
 #include "inference/cvi_session.h"
 #endif
 
+#define SKIP_INFER_TEST
+
 namespace node {
 
 namespace {
@@ -311,14 +313,12 @@ int ModelNode::onStart() {
         bindUpstreamCamera();
     }
 
-    // Request full-resolution STREAM frames for preview (used as WebSocket preview source)
+    // Register preview_inbox_ with camera so it receives stream frames directly.
+    // If camera isn't ready yet, previewLoop will handle lazy registration.
     if (upstream_camera_ && config_.websocket) {
-        upstream_camera_->set_deliver_stream_frame(true);
-        std::cout << "[ModelNode] stream_frame delivery enabled on camera " << camera_id << std::endl;
-    } else if (!upstream_camera_) {
-        std::cout << "[ModelNode] stream_frame delivery SKIPPED: no upstream camera found" << std::endl;
-    } else {
-        std::cout << "[ModelNode] stream_frame delivery SKIPPED: websocket disabled" << std::endl;
+        upstream_camera_->register_preview_subscriber(&preview_inbox_);
+        preview_registered_ = true;
+        std::cout << "[ModelNode] Registered preview with camera " << camera_id << std::endl;
     }
 
     running_.store(true, std::memory_order_release);
@@ -343,7 +343,14 @@ int ModelNode::onStart() {
         });
     }
 
-    infer_thread_ = std::thread(&ModelNode::inferLoop, this);
+    // infer_thread_ = std::thread(&ModelNode::inferLoop, this);
+
+    // Start preview thread: directly receives SharedFrame* pushed by camera_node.
+    // Runs independently of inference state.
+    preview_inbox_.reset();
+    preview_running_.store(true, std::memory_order_release);
+    preview_thread_ = std::thread(&ModelNode::previewLoop, this);
+    std::cout << "[ModelNode] Preview thread started at " << config_.preview_fps << "fps" << std::endl;
 
     // Send enabled event to notify frontend of initial state
     event("enabled", MA_OK, infer_enabled_.load(std::memory_order_acquire));
@@ -357,11 +364,25 @@ int ModelNode::onStop() {
     }
 
     running_.store(false, std::memory_order_release);
-    inbox_.interrupt();  // Wake up blocking fetch
+    inbox_.interrupt();
 
     if (infer_thread_.joinable()) {
         infer_thread_.join();
     }
+
+    // Unregister preview from camera BEFORE stopping preview thread
+    if (upstream_camera_ && preview_registered_) {
+        upstream_camera_->unregister_preview_subscriber(&preview_inbox_);
+        preview_registered_ = false;
+    }
+
+    // Stop preview thread
+    preview_running_.store(false, std::memory_order_release);
+    preview_inbox_.interrupt();
+    if (preview_thread_.joinable()) {
+        preview_thread_.join();
+    }
+    preview_inbox_.clear();  // deleter releases any remaining SharedFrame* refs
 
     if (ws_) {
         ws_->stop();
@@ -370,10 +391,7 @@ int ModelNode::onStop() {
 
     inbox_.clear();
 
-    // Unregister resource usage
     ResourceEstimator::instance().on_node_stopped(id_);
-
-    // Send enabled event to notify frontend of stopped state
     event("enabled", MA_OK, false);
 
     return MA_OK;
@@ -398,19 +416,13 @@ int ModelNode::onControl(const std::string& action, const nlohmann::json& data) 
     }
 
     if (action == "get_stats") {
-        uint64_t sf_count = stream_frame_count_.load();
-        uint64_t if_count = infer_frame_count_.load();
-        uint64_t total = sf_count + if_count;
         response("get_stats", MA_OK, {
             {"infer_count", infer_count_.load()},
             {"error_count", error_count_.load()},
             {"infer_ema_ms", infer_ema_ms_},
             {"ws_event_count", ws_event_count_.load()},
             {"ws_clients", ws_ ? ws_->client_count() : 0},
-            {"stream_frame_count", sf_count},
-            {"infer_frame_fallback_count", if_count},
-            {"stream_frame_ratio", total > 0 ? static_cast<double>(sf_count) / total : 0.0},
-            {"stream_frame_active", sf_count > 0}
+            {"preview_frame_count", stream_frame_count_.load()},
         });
         return MA_OK;
     }
@@ -441,27 +453,15 @@ int ModelNode::onControl(const std::string& action, const nlohmann::json& data) 
     return MA_EINVAL;
 }
 
-void ModelNode::maybeBroadcastPreview(const PipelineContext& ctx, const nlohmann::json& event_data) {
+void ModelNode::maybeBroadcastPreview(const lua_cv::Frame& frame, const nlohmann::json& event_data) {
     if (!config_.websocket || !ws_) {
         return;
     }
 
     try {
-        // Prefer full-resolution STREAM frame for preview when available;
-        // fall back to INFER frame for backward compatibility.
-        const lua_cv::Frame& preview_frame =
-            ctx.has_stream_frame() ? ctx.stream_frame->frame() : ctx.frame->frame();
-
-        if (ctx.has_stream_frame()) {
-            uint64_t cnt = stream_frame_count_.fetch_add(1, std::memory_order_relaxed) + 1;
-            if (cnt == 1) {
-                std::cout << "[ModelNode] First stream_frame received (full-res preview active)" << std::endl;
-            }
-        } else {
-            uint64_t cnt = infer_frame_count_.fetch_add(1, std::memory_order_relaxed) + 1;
-            if (cnt == 1) {
-                std::cout << "[ModelNode] WARN: stream_frame not available, using infer frame for preview" << std::endl;
-            }
+        uint64_t cnt = stream_frame_count_.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (cnt == 1) {
+            std::cout << "[ModelNode] First preview frame received (full-res preview active)" << std::endl;
         }
 
         ModelPreviewFormatConfig preview_config;
@@ -471,7 +471,7 @@ void ModelNode::maybeBroadcastPreview(const PipelineContext& ctx, const nlohmann
 
         nlohmann::json ws_msg = build_model_preview_message(
             event_data,
-            preview_frame,
+            frame,
             preview_config,
             &last_preview_time_,
             &preview_interval_ms_);
@@ -500,11 +500,7 @@ void ModelNode::inferLoop() {
         // setupDataFlow which connected our inbox).
         if (!upstream_camera_) {
             bindUpstreamCamera();
-            if (upstream_camera_ && config_.websocket) {
-                upstream_camera_->set_deliver_stream_frame(true);
-                std::cout << "[ModelNode] Lazily enabled stream_frame delivery on camera "
-                          << upstream_camera_->id() << std::endl;
-            }
+            // No need to call set_deliver_stream_frame(); camera captures unconditionally.
         }
 
         // When disabled, drain inbox without processing
@@ -515,6 +511,13 @@ void ModelNode::inferLoop() {
 
         auto t_start = std::chrono::steady_clock::now();
 
+#ifdef SKIP_INFER_TEST
+        // [TEST] Skip inference: just forward empty event data downstream
+        {
+            nlohmann::json event_data;
+            forwardToDownstream(ctx, event_data);
+        }
+#else
         try {
             nlohmann::json result = runInference(ctx->frame->frame(), ctx->upstream_result);
 
@@ -541,11 +544,13 @@ void ModelNode::inferLoop() {
 
             nlohmann::json event_data = build_inference_event_data(std::move(result));
 
-            event("invoke", MA_OK, event_data);
+            // Cache inference result for previewLoop to overlay on stream frames
+            {
+                std::lock_guard<std::mutex> lock(infer_result_mutex_);
+                latest_infer_result_ = event_data;
+            }
 
-            // Broadcast preview: maybeBroadcastPreview uses stream_frame (full-res) from
-            // PipelineContext if available, otherwise falls back to infer frame.
-            maybeBroadcastPreview(*ctx, event_data);
+            event("invoke", MA_OK, event_data);
 
             // Forward to downstream
             forwardToDownstream(ctx, event_data);
@@ -555,6 +560,7 @@ void ModelNode::inferLoop() {
             std::string error_msg = "Inference failed: " + std::string(e.what());
             event("error", MA_EIO, error_msg);
         }
+#endif
 
         // Clean up: delete ctx (destructor calls frame->release())
         delete ctx;
@@ -770,6 +776,48 @@ void ModelNode::cleanupLuaRef() {
     if (L_) {
         lua_close(L_);
         L_ = nullptr;
+    }
+}
+
+void ModelNode::previewLoop() {
+    while (preview_running_.load(std::memory_order_acquire)) {
+        // Lazy camera registration: handles the case where camera is created AFTER model.
+        // NodeFactory is a singleton accessible globally.
+        if (!upstream_camera_ || !preview_registered_) {
+            if (!upstream_camera_) {
+                bindUpstreamCamera();
+                if (!upstream_camera_) {
+                    // camera not in dependencies_, scan all nodes
+                    upstream_camera_ = NodeFactory::instance().find_camera_node();
+                }
+            }
+            if (upstream_camera_ && !preview_registered_ && config_.websocket) {
+                upstream_camera_->register_preview_subscriber(&preview_inbox_);
+                preview_registered_ = true;
+                std::cout << "[ModelNode] Lazily registered preview with camera "
+                          << upstream_camera_->id() << std::endl;
+            }
+        }
+
+        SharedFrame* sf = nullptr;
+        if (!preview_inbox_.fetch(&sf, 100)) {
+            continue;
+        }
+
+        if (!preview_running_.load(std::memory_order_acquire)) {
+            if (sf) sf->release();
+            break;
+        }
+
+        if (sf) {
+            nlohmann::json event_data;
+            {
+                std::lock_guard<std::mutex> lock(infer_result_mutex_);
+                event_data = latest_infer_result_;
+            }
+            maybeBroadcastPreview(sf->frame(), event_data);
+            sf->release();
+        }
     }
 }
 

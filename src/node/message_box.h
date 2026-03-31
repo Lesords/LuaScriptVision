@@ -121,9 +121,10 @@ public:
             queue_.pop();
             if (deleter_) {
                 deleter_(item);
-            } else {
+            } else if constexpr (std::is_destructible_v<T>) {
                 delete item;
             }
+            // else: T has inaccessible destructor; user must provide a Deleter
         }
     }
 

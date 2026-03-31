@@ -1,10 +1,12 @@
 #pragma once
 
 #include "data_node.h"
+#include "message_box.h"
 #include "model_preprocess_utils.h"
 #include "model_roi_utils.h"
 #include "preprocess_config.h"
 #include "luaref_json.h"
+#include "shared_frame.h"
 
 #include <atomic>
 #include <chrono>
@@ -74,6 +76,8 @@ private:
     void updateEwma(double elapsed_ms);
     void cleanupLuaRef();
     void emitProfile(const nlohmann::json& profile);
+    void previewLoop();
+    void maybeBroadcastPreview(const lua_cv::Frame& frame, const nlohmann::json& event_data);
 
     // Configuration struct
     struct Config {
@@ -121,18 +125,30 @@ private:
     // Inference thread
     std::thread infer_thread_;
     std::atomic<bool> running_{false};
-    std::atomic<bool> infer_enabled_{true};  // Inference enable/disable control
+    std::atomic<bool> infer_enabled_{true};
     std::unique_ptr<lua_cv::WebSocketTransport> ws_;
 
-    // Upstream camera reference (for timing feedback)
+    // Preview thread: receives SharedFrame* directly pushed from camera_node.
+    // camera_node::captureLoop pushes on every new stream frame (independent of inference).
+    MessageBox<SharedFrame> preview_inbox_{1, [](SharedFrame* sf) {
+        if (sf) sf->release();  // auto-release on clear()/interrupt()
+    }};
+    std::thread preview_thread_;
+    std::atomic<bool> preview_running_{false};
+    bool preview_registered_{false};  // whether preview_inbox_ is registered with camera
+
+    // Latest inference result (mutex-protected): inferLoop writes, previewLoop reads.
+    mutable std::mutex infer_result_mutex_;
+    nlohmann::json latest_infer_result_;
+
+    // Upstream camera reference (for timing feedback and preview registration)
     CameraNode* upstream_camera_ = nullptr;
 
     // Statistics
     std::atomic<uint64_t> infer_count_{0};
     std::atomic<uint64_t> error_count_{0};
     std::atomic<uint64_t> ws_event_count_{0};
-    std::atomic<uint64_t> stream_frame_count_{0};  // Frames with stream_frame (full-res)
-    std::atomic<uint64_t> infer_frame_count_{0};   // Frames without stream_frame (infer fallback)
+    std::atomic<uint64_t> stream_frame_count_{0};  // Preview frames successfully sent
     std::chrono::steady_clock::time_point last_preview_time_{};
     int preview_interval_ms_;
     double infer_ema_ms_ = 0.0;

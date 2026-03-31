@@ -1,7 +1,9 @@
 #pragma once
 
 #include "data_node.h"
+#include "message_box.h"
 #include "node_factory.h"
+#include "shared_frame.h"
 
 #include <array>
 #include <atomic>
@@ -53,6 +55,16 @@ public:
     bool deliver_stream_frame() const {
         return deliver_stream_frame_.load(std::memory_order_acquire);
     }
+
+    // Grab the latest full-resolution STREAM frame (Chn0) captured independently.
+    // Returns a ref-incremented SharedFrame pointer; caller must call release().
+    // Returns nullptr if no stream frame is available yet.
+    SharedFrame* grab_latest_stream_frame();
+
+    // Preview subscriber registration: camera pushes SharedFrame* to all registered
+    // inboxes on every new stream frame capture, independent of inference state.
+    void register_preview_subscriber(MessageBox<SharedFrame>* inbox);
+    void unregister_preview_subscriber(MessageBox<SharedFrame>* inbox);
 
     // Downstream timing feedback (called by ModelNode)
     void report_proc_time(const std::string& node_id, double proc_ms);
@@ -142,20 +154,41 @@ private:
     // Enable/disable stream frame delivery (set by downstream nodes at startup)
     std::atomic<bool> deliver_stream_frame_{false};
 
+    // Latest full-resolution STREAM frame (Chn0), updated independently of infer channel.
+    // ModelNode grabs this via grab_latest_stream_frame() after inference completes.
+    SharedFrame* latest_stream_sf_ = nullptr;
+    mutable std::mutex latest_stream_mutex_;
+
+    // Preview subscribers: camera pushes new stream frames to these inboxes directly.
+    std::vector<MessageBox<SharedFrame>*> preview_subscribers_;
+    mutable std::mutex preview_sub_mutex_;
+
     // Statistics
     std::atomic<uint64_t> frame_count_{0};
     std::atomic<uint64_t> skip_count_{0};
     std::atomic<uint64_t> nobuf_count_{0};
 
-    // Internal methods
+    // Internal methods - Capture loop
     void captureLoop();
-    bool processFrame(lua_cv::Frame& frame);
+
+    // INFER channel: capture and process
+    bool captureInferFrame(lua_cv::Frame& frame);
+    bool processInferFrame(lua_cv::Frame& infer_frame);
+
+    // STREAM channel: capture and process
+    bool captureStreamFrame(lua_cv::Frame& frame);
+    bool processStreamFrame(lua_cv::Frame& stream_frame);
+
+    // Common distribution
+    void distributeWithContext(PipelineContext* ctx);
+
+    // Helper methods
+    bool hasInferSubscribers() const;
+    bool hasStreamSubscribers() const;
     bool shouldSkipFrame();
     void updateSkipTiming();
     double getMaxDownstreamProcMs() const;
     double effectiveInferFps() const;
-    void distributeFrame(SharedFrame* sf, SharedFrame* stream_sf,
-                         uint64_t frame_id, FrameChannel channel);
     int computeNobufThreshold() const;
     void applyExponentialBackoff();
 

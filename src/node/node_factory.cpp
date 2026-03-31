@@ -339,6 +339,20 @@ void NodeFactory::destroyAll() {
     singleton_instances_.clear();
 }
 
+#ifdef USE_CVI_MPI
+CameraNode* NodeFactory::find_camera_node() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (auto& [id, node] : nodes_) {
+        if (node->type() == "camera" && node->isStarted()) {
+            return static_cast<CameraNode*>(node.get());
+        }
+    }
+    return nullptr;
+}
+#else
+CameraNode* NodeFactory::find_camera_node() { return nullptr; }
+#endif
+
 void NodeFactory::collectDependents(Node* node, std::vector<std::string>& out) {
     for (const auto& [dep_id, dep] : node->dependents()) {
         // Recursively collect dependents

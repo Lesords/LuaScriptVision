@@ -253,7 +253,8 @@ void StreamNode::encodeLoop() {
         }
 
         lua_cv::VencEncoder::EncodedStream stream;
-        if (!encoder_->get_stream(&stream, 100)) {
+        // Reduced timeout for faster response (100ms → 10ms)
+        if (!encoder_->get_stream(&stream, 10)) {
             continue;
         }
 

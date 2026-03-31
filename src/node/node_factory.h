@@ -50,6 +50,9 @@ public:
     // Cleanup all nodes
     void destroyAll();
 
+    // Node lookup
+    CameraNode* find_camera_node();  // Returns first started camera node, or nullptr
+
     // Server binding
     void setServer(NodeServer* server) { server_ = server; }
     NodeServer* server() const { return server_; }

@@ -354,95 +354,188 @@ bool CameraNode::get_infer_binding(int* vpss_grp, int* vpss_chn) const {
 void CameraNode::captureLoop() {
     while (running_.load(std::memory_order_acquire)) {
 #ifdef USE_CVI_CAMERA
-        lua_cv::Frame frame;
+        // === STREAM Channel: always capture into shared memory (latest_stream_sf_) ===
+        // Any downstream node can call grab_latest_stream_frame() to get the latest
+        // full-resolution NV21 frame without gating on deliver_stream_frame_.
+        if (camera_) {
+            lua_cv::Frame stream_frame;
+            if (captureStreamFrame(stream_frame)) {
+                auto* new_sf = new SharedFrame(std::move(stream_frame));
+                new_sf->set_timestamp(static_cast<uint64_t>(
+                    std::chrono::duration_cast<std::chrono::microseconds>(
+                        std::chrono::steady_clock::now().time_since_epoch()).count()));
 
-        bool log_error = (skip_state_.camera_nobuf_streak == 0);
-        if (!camera_ || !camera_->read(frame, 100, log_error)) {
-            nobuf_count_.fetch_add(1, std::memory_order_relaxed);
-
-            // Handle NOBUF backoff
-            skip_state_.camera_nobuf_streak++;
-            if (skip_state_.camera_nobuf_streak >= computeNobufThreshold()) {
-                applyExponentialBackoff();
-                if (!running_.load(std::memory_order_acquire)) {
-                    break;
+                // Update shared latest frame
+                {
+                    std::lock_guard<std::mutex> lock(latest_stream_mutex_);
+                    if (latest_stream_sf_) latest_stream_sf_->release();
+                    latest_stream_sf_ = new_sf;  // holds initial ref (ref_count=1)
                 }
-                auto now = std::chrono::steady_clock::now();
-                if (skip_state_.next_infer_time > now) {
-                    auto cooldown = skip_state_.next_infer_time - now;
-                    if (cooldown > std::chrono::milliseconds(1)) {
-                        std::this_thread::sleep_for(cooldown);
+
+                // Push to all registered preview subscribers (ref per subscriber)
+                {
+                    std::lock_guard<std::mutex> lock(preview_sub_mutex_);
+                    for (auto* inbox : preview_subscribers_) {
+                        new_sf->ref();
+                        if (!inbox->post(new_sf, 0)) {
+                            new_sf->release();  // inbox full, drop frame
+                        }
                     }
                 }
             }
-            continue;
         }
 
-        // Reset NOBUF streak on successful read
-        skip_state_.camera_nobuf_streak = 0;
-        skip_state_.backoff_exponent = 0;
-
-        // Check if we should skip this frame
-        if (shouldSkipFrame()) {
-            skip_count_.fetch_add(1, std::memory_order_relaxed);
-            continue;
-        }
-
-        // Process and distribute frame
-        if (processFrame(frame)) {
-            frame_count_.fetch_add(1, std::memory_order_relaxed);
+        // === INFER Channel: capture and process (pure infer, no stream coupling) ===
+        lua_cv::Frame infer_frame;
+        if (captureInferFrame(infer_frame)) {
+            processInferFrame(infer_frame);
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
 #else
         // Simulation mode without CVI Camera
         std::this_thread::sleep_for(std::chrono::milliseconds(33));  // ~30 FPS
 #endif
     }
+
+    // Cleanup latest stream frame on exit
+    std::lock_guard<std::mutex> lock(latest_stream_mutex_);
+    if (latest_stream_sf_) {
+        latest_stream_sf_->release();
+        latest_stream_sf_ = nullptr;
+    }
 }
 
-bool CameraNode::processFrame(lua_cv::Frame& frame) {
-    uint64_t frame_id = next_frame_id_++;
-
-    // Create SharedFrame (reference counting wrapper)
-    auto* sf = new SharedFrame(std::move(frame));
-    sf->set_timestamp(static_cast<uint64_t>(
-        std::chrono::duration_cast<std::chrono::microseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count()));
-    sf->set_frame_id(frame_id);
-
-    // Optionally capture STREAM channel (full-res) frame alongside INFER frame.
-    // Use a short timeout to tolerate momentary VPSS buffer delays without
-    // blocking the capture loop for too long.
-    SharedFrame* stream_sf = nullptr;
+// ========================================
+// INFER Channel: Capture
+// ========================================
+bool CameraNode::captureInferFrame(lua_cv::Frame& frame) {
 #ifdef USE_CVI_CAMERA
-    if (deliver_stream_frame_.load(std::memory_order_acquire) && camera_) {
-        lua_cv::Frame stream_frame;
-        if (camera_->read_stream(stream_frame, 10)) {  // 10ms: tolerate brief VPSS delay
-            stream_sf = new SharedFrame(std::move(stream_frame));
-            stream_sf->set_timestamp(sf->timestamp());
-            stream_sf->set_frame_id(frame_id);
-        } else {
-            static std::atomic<uint32_t> stream_fail_count{0};
-            uint32_t cnt = stream_fail_count.fetch_add(1, std::memory_order_relaxed) + 1;
-            if (cnt == 1 || cnt % 300 == 0) {
-                std::cerr << "[CameraNode] WARN: read_stream(Chn0) failed"
-                          << " (count=" << cnt << "), stream_frame will be null for this frame" << std::endl;
+    bool log_error = (skip_state_.camera_nobuf_streak == 0);
+    if (!camera_ || !camera_->read(frame, 100, log_error)) {
+        nobuf_count_.fetch_add(1, std::memory_order_relaxed);
+
+        // Handle NOBUF backoff
+        skip_state_.camera_nobuf_streak++;
+        if (skip_state_.camera_nobuf_streak >= computeNobufThreshold()) {
+            applyExponentialBackoff();
+            if (!running_.load(std::memory_order_acquire)) {
+                return false;
+            }
+
+            // Wait for cooldown time before returning
+            // This prevents immediate retry and gives VPSS time to recover
+            auto now = std::chrono::steady_clock::now();
+            if (skip_state_.next_infer_time > now) {
+                auto cooldown = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    skip_state_.next_infer_time - now);
+                if (cooldown > std::chrono::milliseconds(1)) {
+                    std::this_thread::sleep_for(cooldown);
+                }
             }
         }
+        return false;
     }
+
+    // Reset NOBUF streak on successful read
+    skip_state_.camera_nobuf_streak = 0;
+    skip_state_.backoff_exponent = 0;
+    return true;
+#else
+    (void)frame;
+    return false;
 #endif
+}
 
-    // Distribute to inference channel subscribers
-    if (config_.enable_inference && inference_enabled_.load(std::memory_order_acquire)) {
-        distributeFrame(sf, stream_sf, frame_id, FrameChannel::INFER);
+// ========================================
+// INFER Channel: Process and distribute
+// ========================================
+bool CameraNode::processInferFrame(lua_cv::Frame& infer_frame) {
+    // Check if we should skip this frame (infer FPS limit)
+    if (shouldSkipFrame()) {
+        skip_count_.fetch_add(1, std::memory_order_relaxed);
+        return false;
     }
 
-    if (stream_sf) stream_sf->release();  // Release initial ref; subscribers hold theirs
-    sf->release();
+    uint64_t frame_id = next_frame_id_++;
+
+    // Create SharedFrame for INFER channel
+    auto* infer_sf = new SharedFrame(std::move(infer_frame));
+    infer_sf->set_timestamp(static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count()));
+    infer_sf->set_frame_id(frame_id);
+
+    // Check if there are INFER subscribers
+    if (!hasInferSubscribers()) {
+        infer_sf->release();
+        return false;
+    }
+
+    // INFER channel only: stream_frame is always nullptr here.
+    // The STREAM frame is captured independently in captureLoop() and stored
+    // in latest_stream_sf_. ModelNode retrieves it via grab_latest_stream_frame()
+    // after inference completes, keeping the two channels fully decoupled.
+    auto* ctx = new PipelineContext{
+        infer_sf,         // INFER frame (scaled, for inference)
+        nullptr,          // STREAM frame: delivered independently, not via PipelineContext
+        nlohmann::json{}, // Empty upstream_result (from CameraNode)
+        frame_id
+    };
+
+    // Distribute to INFER channel subscribers
+    if (config_.enable_inference && inference_enabled_.load(std::memory_order_acquire)) {
+        distributeWithContext(ctx);
+    }
+
+    // Cleanup: PipelineContext deletion handles reference counting
+    // Note: distributeWithContext increments refs for each subscriber
+    delete ctx;
 
     // Update skip timing based on downstream feedback
     updateSkipTiming();
 
+    frame_count_.fetch_add(1, std::memory_order_relaxed);
     return true;
+}
+
+// ========================================
+// STREAM Channel: Capture
+// ========================================
+bool CameraNode::captureStreamFrame(lua_cv::Frame& frame) {
+#ifdef USE_CVI_CAMERA
+    if (!camera_) {
+        return false;
+    }
+
+    // Use short timeout to avoid blocking the capture loop
+    if (!camera_->read_stream(frame, 10)) {
+        static std::atomic<uint32_t> stream_fail_count{0};
+        uint32_t cnt = stream_fail_count.fetch_add(1, std::memory_order_relaxed) + 1;
+        if (cnt == 1 || cnt % 300 == 0) {
+            std::cerr << "[CameraNode] WARN: STREAM frame capture failed"
+                      << " (count=" << cnt << ")" << std::endl;
+        }
+        return false;
+    }
+    return true;
+#else
+    (void)frame;
+    return false;
+#endif
+}
+
+// ========================================
+// Helper methods
+// ========================================
+bool CameraNode::hasInferSubscribers() const {
+    std::lock_guard<std::mutex> lock(channel_mutex_);
+    return !channel_subscribers_[static_cast<size_t>(FrameChannel::INFER)].empty();
+}
+
+bool CameraNode::hasStreamSubscribers() const {
+    std::lock_guard<std::mutex> lock(channel_mutex_);
+    return !channel_subscribers_[static_cast<size_t>(FrameChannel::STREAM)].empty();
 }
 
 bool CameraNode::shouldSkipFrame() {
@@ -498,28 +591,71 @@ double CameraNode::getMaxDownstreamProcMs() const {
     return max_proc_ms;
 }
 
-void CameraNode::distributeFrame(SharedFrame* sf, SharedFrame* stream_sf,
-                                   uint64_t frame_id, FrameChannel channel) {
+void CameraNode::distributeWithContext(PipelineContext* ctx) {
+    if (!ctx) return;
+
     std::lock_guard<std::mutex> lock(channel_mutex_);
-    auto& subs = channel_subscribers_[static_cast<size_t>(channel)];
+
+    // Determine target channel based on which frame is present
+    FrameChannel target_channel;
+    if (ctx->frame != nullptr) {
+        target_channel = FrameChannel::INFER;
+    } else if (ctx->stream_frame != nullptr) {
+        target_channel = FrameChannel::STREAM;
+    } else {
+        return;  // No frames to distribute
+    }
+
+    auto& subs = channel_subscribers_[static_cast<size_t>(target_channel)];
 
     for (auto* mbox : subs) {
-        // Bump infer frame ref for this subscriber
-        sf->ref();
-        // Bump stream frame ref for this subscriber (if present)
-        if (stream_sf) stream_sf->ref();
-
-        auto* ctx = new PipelineContext{
-            sf,
-            stream_sf,
-            nlohmann::json{},  // Empty upstream_result (CameraNode is source)
-            frame_id
+        // Create a new PipelineContext for each subscriber
+        auto* ctx_copy = new PipelineContext{
+            ctx->frame,
+            ctx->stream_frame,
+            ctx->upstream_result,
+            ctx->frame_id
         };
 
-        if (!mbox->post(ctx, 0)) {
-            // Post failed, cleanup (delete calls destructor which calls release)
-            delete ctx;
+        // Increment reference counts for this subscriber
+        if (ctx_copy->frame) {
+            ctx_copy->frame->ref();
         }
+        if (ctx_copy->stream_frame) {
+            ctx_copy->stream_frame->ref();
+        }
+
+        if (!mbox->post(ctx_copy, 0)) {
+            // Post failed, cleanup
+            delete ctx_copy;
+        }
+    }
+}
+
+SharedFrame* CameraNode::grab_latest_stream_frame() {
+    std::lock_guard<std::mutex> lock(latest_stream_mutex_);
+    if (!latest_stream_sf_) return nullptr;
+    latest_stream_sf_->ref();  // caller owns this reference; must call release()
+    return latest_stream_sf_;
+}
+
+void CameraNode::register_preview_subscriber(MessageBox<SharedFrame>* inbox) {
+    if (!inbox) return;
+    std::lock_guard<std::mutex> lock(preview_sub_mutex_);
+    for (auto* existing : preview_subscribers_) {
+        if (existing == inbox) return;  // already registered
+    }
+    preview_subscribers_.push_back(inbox);
+    std::cout << "[CameraNode] Preview subscriber registered (total=" << preview_subscribers_.size() << ")" << std::endl;
+}
+
+void CameraNode::unregister_preview_subscriber(MessageBox<SharedFrame>* inbox) {
+    if (!inbox) return;
+    std::lock_guard<std::mutex> lock(preview_sub_mutex_);
+    auto it = std::find(preview_subscribers_.begin(), preview_subscribers_.end(), inbox);
+    if (it != preview_subscribers_.end()) {
+        preview_subscribers_.erase(it);
+        std::cout << "[CameraNode] Preview subscriber unregistered (total=" << preview_subscribers_.size() << ")" << std::endl;
     }
 }
 
