@@ -8,6 +8,7 @@
 
 #ifdef USE_CVI_MPI
 #include "stream/venc_encoder.h"
+#include "modules/cv/cvi_vpss_processor.h"
 #endif
 
 #include <atomic>
@@ -135,6 +136,9 @@ private:
 #ifdef USE_CVI_MPI
     std::unique_ptr<lua_cv::VencEncoder> jpeg_encoder_;
     bool jpeg_encoder_init_failed_ = false;  // prevents infinite retry on permanent failures
+    // Persistent VPSS preprocessor for inference: reused across frames to avoid per-frame
+    // CVI_VPSS_CreateGrp/DestroyGrp which accumulates ION work buffers and causes OOM.
+    std::unique_ptr<lua_cv::CviVpssProcessor> vpss_processor_;
 #endif
     std::thread preview_thread_;
     std::atomic<bool> preview_running_{false};

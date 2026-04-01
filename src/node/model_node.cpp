@@ -375,6 +375,14 @@ int ModelNode::onStart() {
 
     infer_thread_ = std::thread(&ModelNode::inferLoop, this);
 
+#ifdef USE_CVI_MPI
+    // Create persistent VPSS preprocessor: shared across all inference frames.
+    // Must be created AFTER infer_thread_ starts so the thread can access it immediately.
+    if (session_ && session_->supports_vb_input()) {
+        vpss_processor_ = std::make_unique<lua_cv::CviVpssProcessor>();
+    }
+#endif
+
     // Start preview thread (polls JPEG encoder for frames, independent of inference)
     preview_running_.store(true, std::memory_order_release);
     preview_thread_ = std::thread(&ModelNode::previewLoop, this);
@@ -410,6 +418,7 @@ int ModelNode::onStop() {
         jpeg_encoder_->shutdown();
         jpeg_encoder_.reset();
     }
+    vpss_processor_.reset();
 #endif
 
     if (ws_) {
@@ -620,6 +629,9 @@ nlohmann::json ModelNode::runFullFrameInference(const lua_cv::Frame& frame,
             config_.crop_size_explicit,
             config_.crop_width,
             config_.crop_height,
+#ifdef USE_CVI_MPI
+            vpss_processor_.get(),
+#endif
         });
     if (execution.warning) {
         // Rate-limit to once per 30 frames to avoid flooding the frontend
@@ -699,6 +711,9 @@ nlohmann::json ModelNode::runSingleRoiInference(const lua_cv::Frame& frame,
             config_.crop_size_explicit,
             config_.crop_width,
             config_.crop_height,
+#ifdef USE_CVI_MPI
+            vpss_processor_.get(),
+#endif
         });
     if (execution.warning) {
         if (infer_count_.load(std::memory_order_relaxed) % 30 == 0) {

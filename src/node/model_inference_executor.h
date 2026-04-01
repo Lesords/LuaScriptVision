@@ -10,7 +10,7 @@
 #include <vector>
 
 namespace inference { class CviSession; }
-namespace lua_cv { class Frame; }
+namespace lua_cv { class Frame; class CviVpssProcessor; }
 
 namespace node {
 
@@ -25,6 +25,10 @@ struct ModelExecutorConfig {
     bool crop_size_explicit = false;
     int crop_width = 0;
     int crop_height = 0;
+    // Persistent VPSS processor: reused across frames to avoid per-frame
+    // CVI_VPSS_CreateGrp/DestroyGrp which leaks ION work buffers in the driver.
+    // Owned by ModelNode, lifetime matches inference session.
+    lua_cv::CviVpssProcessor* vpss_processor = nullptr;
 };
 
 struct FullFrameExecutionResult {

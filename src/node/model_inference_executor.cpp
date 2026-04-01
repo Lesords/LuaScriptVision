@@ -93,7 +93,8 @@ FullFrameExecutionResult execute_full_frame_inference(const lua_cv::Frame& frame
                 work = frame.clone();
             }
 
-            lua_cv::CviVpssProcessor vpss;
+            lua_cv::CviVpssProcessor local_vpss;
+            lua_cv::CviVpssProcessor& vpss = config.vpss_processor ? *config.vpss_processor : local_vpss;
             if (preprocess_type == "letterbox") {
                 result.preprocess_meta = compute_letterbox_meta(frame.width(), frame.height(),
                                                                 target_w, target_h,
@@ -292,7 +293,8 @@ RoiExecutionResult execute_roi_inference(const lua_cv::Frame& frame,
                 work = frame.clone();
             }
 
-            lua_cv::CviVpssProcessor vpss;
+            lua_cv::CviVpssProcessor local_vpss;
+            lua_cv::CviVpssProcessor& vpss = config.vpss_processor ? *config.vpss_processor : local_vpss;
             if (preprocess_type == "letterbox") {
                 vpss.crop(work, roi.x, roi.y, roi.w, roi.h);
                 result.preprocess_meta = compute_letterbox_meta(roi.w, roi.h, target_w, target_h,
