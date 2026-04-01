@@ -84,8 +84,8 @@ const MmfPlan& plan() {
             VbPoolSpec{1920, 1080, PixelFormat::NV21, 5, true},  // Pool 0
             VbPoolSpec{1920, 1080, PixelFormat::NV21, 5, true},  // Pool 1
             VbPoolSpec{640, 360, PixelFormat::NV21, 2, true},    // Pool 2: preview Chn2 output (depth=1+VENC=2 blocks) ~0.66MB
-            VbPoolSpec{640, 640, PixelFormat::RGB_PLANAR, 2, true},
-            VbPoolSpec{640, 640, PixelFormat::RGB, 3, true},     // Pool 4: infer output (depth=2+process=3 blocks, reduced from 4)
+            VbPoolSpec{640, 640, PixelFormat::RGB_PLANAR, 2, true},  // Pool 3: unused placeholder (keep for pool index alignment)
+            VbPoolSpec{640, 640, PixelFormat::RGB, 5, true},          // Pool 4: shared camera-infer (depth=2+hold=1) + VPSS-mem (depth=1+hold=1) = 5
             VbPoolSpec{0, 0, PixelFormat::UNKNOWN, 0, true},
         },
     };

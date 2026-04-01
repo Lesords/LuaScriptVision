@@ -27,8 +27,6 @@
 #include "inference/cvi_session.h"
 #endif
 
-#define SKIP_INFER_TEST
-
 namespace node {
 
 namespace {
@@ -375,12 +373,12 @@ int ModelNode::onStart() {
         });
     }
 
-    // infer_thread_ = std::thread(&ModelNode::inferLoop, this);
+    infer_thread_ = std::thread(&ModelNode::inferLoop, this);
 
     // Start preview thread (polls JPEG encoder for frames, independent of inference)
     preview_running_.store(true, std::memory_order_release);
     preview_thread_ = std::thread(&ModelNode::previewLoop, this);
-    std::cout << "[ModelNode] Preview thread started at " << config_.preview_fps << "fps" << std::endl;
+    std::cout << "[ModelNode] Inference + Preview threads started" << std::endl;
 
     // Send enabled event to notify frontend of initial state
     event("enabled", MA_OK, infer_enabled_.load(std::memory_order_acquire));
@@ -587,8 +585,13 @@ void ModelNode::inferLoop() {
 
         } catch (const std::exception& e) {
             error_count_.fetch_add(1, std::memory_order_relaxed);
-            std::string error_msg = "Inference failed: " + std::string(e.what());
-            event("error", MA_EIO, error_msg);
+            event("error", MA_EIO, std::string("Inference failed: ") + e.what());
+            // Still forward empty result so downstream nodes don't stall
+            forwardToDownstream(ctx, {});
+        } catch (...) {
+            error_count_.fetch_add(1, std::memory_order_relaxed);
+            event("error", MA_EIO, "Inference failed: unknown exception");
+            forwardToDownstream(ctx, {});
         }
 #endif
 
@@ -619,10 +622,13 @@ nlohmann::json ModelNode::runFullFrameInference(const lua_cv::Frame& frame,
             config_.crop_height,
         });
     if (execution.warning) {
-        event("warning", 0, {
-            {"message", execution.warning->message},
-            {"detail", execution.warning->detail}
-        });
+        // Rate-limit to once per 30 frames to avoid flooding the frontend
+        if (infer_count_.load(std::memory_order_relaxed) % 30 == 0) {
+            event("warning", 0, {
+                {"message", execution.warning->message},
+                {"detail", execution.warning->detail}
+            });
+        }
     }
 
     int meta_frame_w = frame.width();
@@ -695,10 +701,12 @@ nlohmann::json ModelNode::runSingleRoiInference(const lua_cv::Frame& frame,
             config_.crop_height,
         });
     if (execution.warning) {
-        event("warning", 0, {
-            {"message", execution.warning->message},
-            {"detail", execution.warning->detail}
-        });
+        if (infer_count_.load(std::memory_order_relaxed) % 30 == 0) {
+            event("warning", 0, {
+                {"message", execution.warning->message},
+                {"detail", execution.warning->detail}
+            });
+        }
     }
     if (!execution.valid) {
         return nullptr;

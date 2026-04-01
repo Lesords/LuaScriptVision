@@ -130,6 +130,13 @@ FullFrameExecutionResult execute_full_frame_inference(const lua_cv::Frame& frame
         } catch (const std::exception& e) {
             result.warning = ExecutionWarning{"VPSS preprocess failed", e.what()};
             preprocessed = lua_cv::Frame();
+            // For CVI VB-input models (INT8), the CPU float fallback cannot work
+            // because the model expects quantized VB buffers, not float data.
+            // Re-throw to surface the VPSS failure rather than producing a misleading
+            // shape-mismatch error downstream.
+            if (config.session->supports_vb_input()) {
+                throw;
+            }
         }
     }
 #endif
