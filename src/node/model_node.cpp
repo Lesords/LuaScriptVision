@@ -149,6 +149,11 @@ void ModelNode::parsePreviewConfig(const nlohmann::json& config) {
 int ModelNode::initializeSession() {
 #ifdef USE_CVI_TPU
     try {
+        // Release any existing session BEFORE loading new model.
+        // unique_ptr assignment would otherwise keep old session alive during
+        // new session construction — both model copies in ION simultaneously
+        // can exceed the 60MB carveout (38MB VB pools + 2×7.73MB = ~54MB peak).
+        session_.reset();
         session_ = std::make_unique<inference::CviSession>(config_.model_path);
 
         if (preprocess_config_ref_.isTable()) {
@@ -323,7 +328,7 @@ int ModelNode::onStart() {
             enc_cfg.width   = lua_cv::MmfContext::camera_preview_width();
             enc_cfg.height  = lua_cv::MmfContext::camera_preview_height();
             enc_cfg.fps     = static_cast<uint32_t>(config_.preview_fps);
-            enc_cfg.bitrate_kbps = 2000;  // 2Mbps sufficient for 640×360 MJPEG
+            enc_cfg.bitrate_kbps = 8000;  // 8Mbps for 1280×720 MJPEG (4× pixels vs old 640×360)
             jpeg_encoder_ = std::make_unique<lua_cv::VencEncoder>(enc_cfg);
             if (jpeg_encoder_->init()) {
                 if (jpeg_encoder_->bind_to_vpss(static_cast<VPSS_GRP>(vpss_grp),
@@ -859,7 +864,7 @@ void ModelNode::previewLoop() {
                         enc_cfg.width        = lua_cv::MmfContext::camera_preview_width();
                         enc_cfg.height       = lua_cv::MmfContext::camera_preview_height();
                         enc_cfg.fps          = static_cast<uint32_t>(config_.preview_fps);
-                        enc_cfg.bitrate_kbps = 2000;
+                        enc_cfg.bitrate_kbps = 8000;  // 8Mbps for 1280×720 MJPEG (4× pixels vs old 640×360)
                         jpeg_encoder_ = std::make_unique<lua_cv::VencEncoder>(enc_cfg);
                         if (jpeg_encoder_->init()) {
                             if (jpeg_encoder_->bind_to_vpss(static_cast<VPSS_GRP>(vpss_grp),

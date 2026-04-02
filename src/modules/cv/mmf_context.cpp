@@ -69,7 +69,7 @@ const MmfPlan& plan() {
         },
         CameraOutputPlan{0, 1920, 1080, PixelFormat::NV21, 3},   // camera_stream: Chn0
         CameraOutputPlan{1, 640, 640, PixelFormat::RGB, 2},       // camera_infer:  Chn1
-        CameraOutputPlan{2, 640, 360, PixelFormat::NV21, 1},      // camera_preview: Chn2 → VENC MJPEG (depth=1: 1 queued + 1 in VENC = 2 blocks)
+        CameraOutputPlan{2, 1280, 720, PixelFormat::NV21, 1},      // camera_preview: Chn2 → VENC MJPEG (depth=1: 1 queued + 1 in VENC = 2 blocks)
         {
             Resolution{1920, 1080},
             Resolution{0, 0},
@@ -83,7 +83,7 @@ const MmfPlan& plan() {
         {
             VbPoolSpec{1920, 1080, PixelFormat::NV21, 5, true},  // Pool 0
             VbPoolSpec{1920, 1080, PixelFormat::NV21, 5, true},  // Pool 1
-            VbPoolSpec{640, 360, PixelFormat::NV21, 2, true},    // Pool 2: preview Chn2 output (depth=1+VENC=2 blocks) ~0.66MB
+            VbPoolSpec{1280, 720, PixelFormat::NV21, 2, true},    // Pool 2: preview Chn2 output (depth=1+VENC=2 blocks) ~2.64MB
             VbPoolSpec{640, 640, PixelFormat::RGB_PLANAR, 2, true},  // Pool 3: unused placeholder (keep for pool index alignment)
             VbPoolSpec{640, 640, PixelFormat::RGB, 5, true},          // Pool 4: shared camera-infer (depth=2+hold=1) + VPSS-mem (depth=1+hold=1) = 5
             VbPoolSpec{0, 0, PixelFormat::UNKNOWN, 0, true},
