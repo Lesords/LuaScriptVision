@@ -147,7 +147,9 @@ void Node::response(const std::string& name, int code, const nlohmann::json& dat
 
 void Node::event(const std::string& name, int code, const nlohmann::json& data) {
     // 调试信息：输出事件名称、代码和数据内容
-    std::cout << "[Debug] Event: " << name << ", Code: " << code << ", Data: " << data.dump() << std::endl;
+    if (name != "invoke") {  // 避免过多日志输出，过滤掉频繁的 "invoke" 事件
+        std::cout << "[Debug] Event: " << name << ", Code: " << code << ", Data: " << data.dump() << std::endl;
+    }
     if (server_) {
         server_->event(id_, name, code, data);
     }
