@@ -82,11 +82,11 @@ const MmfPlan& plan() {
             Resolution{0, 0},
         },
         {
-            VbPoolSpec{1920, 1080, PixelFormat::NV21, 5, true, VbPoolUsage::CAMERA_VI},        // Pool 0: VI input
+            VbPoolSpec{1920, 1080, PixelFormat::NV21, 4, true, VbPoolUsage::CAMERA_VI},        // Pool 0: VI input (depth=3+1=4)
             VbPoolSpec{1920, 1080, PixelFormat::NV21, 5, true, VbPoolUsage::CAMERA_STREAM},   // Pool 1: VPSS Chn0 stream
             VbPoolSpec{1280, 720, PixelFormat::NV21, 2, true, VbPoolUsage::CAMERA_PREVIEW},   // Pool 2: VPSS Chn2 preview (depth=1+VENC=2 blocks)
             VbPoolSpec{640, 640, PixelFormat::RGB, 2, true, VbPoolUsage::VPSS_PREPROCESS},     // Pool 3: VPSS Grp5 preprocess output (was RGB_PLANAR unused)
-            VbPoolSpec{640, 640, PixelFormat::RGB, 3, true, VbPoolUsage::CAMERA_INFER},        // Pool 4: VPSS Chn1 infer (depth=2+hold=1 = 3, no longer shared)
+            VbPoolSpec{640, 640, PixelFormat::RGB, 4, true, VbPoolUsage::CAMERA_INFER},        // Pool 4: VPSS Chn1 infer (depth=2+hold=1+margin=1 = 4)
             VbPoolSpec{0, 0, PixelFormat::UNKNOWN, 0, true, VbPoolUsage::ANY},
         },
     };
