@@ -43,6 +43,7 @@ struct VbPoolSpec {
     PixelFormat format = PixelFormat::UNKNOWN;
     uint32_t block_count = 0;
     bool cached = true;
+    VbPoolUsage usage = VbPoolUsage::ANY;
 };
 
 struct MmfPlan {
@@ -81,12 +82,12 @@ const MmfPlan& plan() {
             Resolution{0, 0},
         },
         {
-            VbPoolSpec{1920, 1080, PixelFormat::NV21, 5, true},  // Pool 0
-            VbPoolSpec{1920, 1080, PixelFormat::NV21, 5, true},  // Pool 1
-            VbPoolSpec{1280, 720, PixelFormat::NV21, 2, true},    // Pool 2: preview Chn2 output (depth=1+VENC=2 blocks) ~2.64MB
-            VbPoolSpec{640, 640, PixelFormat::RGB_PLANAR, 2, true},  // Pool 3: unused placeholder (keep for pool index alignment)
-            VbPoolSpec{640, 640, PixelFormat::RGB, 5, true},          // Pool 4: shared camera-infer (depth=2+hold=1) + VPSS-mem (depth=1+hold=1) = 5
-            VbPoolSpec{0, 0, PixelFormat::UNKNOWN, 0, true},
+            VbPoolSpec{1920, 1080, PixelFormat::NV21, 5, true, VbPoolUsage::CAMERA_VI},        // Pool 0: VI input
+            VbPoolSpec{1920, 1080, PixelFormat::NV21, 5, true, VbPoolUsage::CAMERA_STREAM},   // Pool 1: VPSS Chn0 stream
+            VbPoolSpec{1280, 720, PixelFormat::NV21, 2, true, VbPoolUsage::CAMERA_PREVIEW},   // Pool 2: VPSS Chn2 preview (depth=1+VENC=2 blocks)
+            VbPoolSpec{640, 640, PixelFormat::RGB, 2, true, VbPoolUsage::VPSS_PREPROCESS},     // Pool 3: VPSS Grp5 preprocess output (was RGB_PLANAR unused)
+            VbPoolSpec{640, 640, PixelFormat::RGB, 3, true, VbPoolUsage::CAMERA_INFER},        // Pool 4: VPSS Chn1 infer (depth=2+hold=1 = 3, no longer shared)
+            VbPoolSpec{0, 0, PixelFormat::UNKNOWN, 0, true, VbPoolUsage::ANY},
         },
     };
     return kPlan;
@@ -213,20 +214,23 @@ bool build_vb_plan(VbPoolPlan* vb_plan) {
                           pool.height,
                           pool.format,
                           pool.block_count,
-                          pool.cached ? VB_REMAP_MODE_CACHED : VB_REMAP_MODE_NOCACHE);
+                          pool.cached ? VB_REMAP_MODE_CACHED : VB_REMAP_MODE_NOCACHE,
+                          pool.usage);
     }
     return true;
 }
 }  // namespace
 
 void VbPoolPlan::add_pool(uint32_t width, uint32_t height, PixelFormat format,
-                          uint32_t block_count, VB_REMAP_MODE_E remap) {
+                          uint32_t block_count, VB_REMAP_MODE_E remap,
+                          VbPoolUsage usage) {
     Pool pool;
     pool.width = width;
     pool.height = height;
     pool.format = format;
     pool.block_count = block_count;
     pool.remap = remap;
+    pool.usage = usage;
     pools_.push_back(pool);
 }
 
@@ -256,7 +260,8 @@ bool VbPoolPlan::build() {
     return true;
 }
 
-VB_POOL VbPoolPlan::find_pool(uint32_t width, uint32_t height, PixelFormat format) const {
+VB_POOL VbPoolPlan::find_pool(uint32_t width, uint32_t height, PixelFormat format,
+                             VbPoolUsage usage) const {
     if (!built_ || pools_.empty()) {
         return VB_INVALID_POOLID;
     }
@@ -273,6 +278,11 @@ VB_POOL VbPoolPlan::find_pool(uint32_t width, uint32_t height, PixelFormat forma
         for (size_t i = 0; i < pools_.size(); ++i) {
             const Pool& pool = pools_[i];
             if (pool.format != target_format || pool.block_size == 0) {
+                continue;
+            }
+            // Strict usage filtering: when usage != ANY, only match pools
+            // with the same usage tag. When usage == ANY, match any pool.
+            if (usage != VbPoolUsage::ANY && pool.usage != usage) {
                 continue;
             }
             if (pool.block_size >= needed &&

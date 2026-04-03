@@ -24,16 +24,19 @@ public:
         uint32_t block_count = 0;
         VB_REMAP_MODE_E remap = VB_REMAP_MODE_CACHED;
         uint32_t block_size = 0;
+        VbPoolUsage usage = VbPoolUsage::ANY;
     };
 
     void add_pool(uint32_t width, uint32_t height, PixelFormat format,
-                  uint32_t block_count, VB_REMAP_MODE_E remap);
+                  uint32_t block_count, VB_REMAP_MODE_E remap,
+                  VbPoolUsage usage = VbPoolUsage::ANY);
 
     bool build();
     const VB_CONFIG_S& vb_config() const { return vb_config_; }
     const std::vector<Pool>& pools() const { return pools_; }
 
-    VB_POOL find_pool(uint32_t width, uint32_t height, PixelFormat format) const;
+    VB_POOL find_pool(uint32_t width, uint32_t height, PixelFormat format,
+                      VbPoolUsage usage = VbPoolUsage::ANY) const;
     uint32_t find_block_size(uint32_t width, uint32_t height, PixelFormat format) const;
 
 private:

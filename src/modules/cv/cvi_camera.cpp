@@ -1213,7 +1213,8 @@ bool CviCamera::start_vi_channel() {
         pool = MmfContext::instance().vb_plan().find_pool(
             static_cast<CVI_U32>(width_),
             static_cast<CVI_U32>(height_),
-            PixelFormat::NV21);
+            PixelFormat::NV21,
+            VbPoolUsage::CAMERA_VI);
     }
     if (pool == VB_INVALID_POOLID) {
         std::cerr << "[ERROR] CviCamera: no VB pool for "
@@ -1344,6 +1345,7 @@ bool CviCamera::init_vpss() {
                              PixelFormat out_fmt,
                              uint32_t depth,
                              VB_POOL preferred_pool,
+                             VbPoolUsage pool_usage,
                              const char* tag,
                              VB_POOL* out_pool,
                              bool* enabled,
@@ -1377,7 +1379,7 @@ bool CviCamera::init_vpss() {
         if (pool != VB_INVALID_POOLID) {
             log_vpss_pool_selection(vb_plan, out_w, out_h, out_fmt, pool, tag);
         } else {
-            pool = vb_plan.find_pool(out_w, out_h, out_fmt);
+            pool = vb_plan.find_pool(out_w, out_h, out_fmt, pool_usage);
             if (pool != VB_INVALID_POOLID) {
                 log_vpss_pool_selection(vb_plan, out_w, out_h, out_fmt, pool, tag);
             }
@@ -1420,7 +1422,7 @@ bool CviCamera::init_vpss() {
         stream_pool_hint = static_cast<VB_POOL>(plan_pool);
     }
     if (!setup_channel(vpss_stream_chn_, stream_w, stream_h, stream_format,
-                       stream_depth, stream_pool_hint, "camera_stream",
+                       stream_depth, stream_pool_hint, VbPoolUsage::CAMERA_STREAM, "camera_stream",
                        &vpss_stream_pool_, &vpss_stream_chn_enabled_,
                        &vpss_stream_pool_attached_)) {
         return false;
@@ -1428,7 +1430,7 @@ bool CviCamera::init_vpss() {
 
     if (config_.enable_infer) {
         if (!setup_channel(vpss_chn_, infer_w, infer_h, infer_format,
-                           infer_depth, VB_INVALID_POOLID, "camera_infer",
+                           infer_depth, VB_INVALID_POOLID, VbPoolUsage::CAMERA_INFER, "camera_infer",
                            &vpss_pool_, &vpss_chn_enabled_, &vpss_pool_attached_)) {
             return false;
         }
@@ -1444,7 +1446,7 @@ bool CviCamera::init_vpss() {
         PixelFormat prev_fmt = MmfContext::camera_preview_format();
         uint32_t prev_depth = MmfContext::camera_preview_depth();
         if (!setup_channel(vpss_preview_chn_, prev_w, prev_h, prev_fmt,
-                           prev_depth, VB_INVALID_POOLID, "camera_preview",
+                           prev_depth, VB_INVALID_POOLID, VbPoolUsage::CAMERA_PREVIEW, "camera_preview",
                            &vpss_preview_pool_, &vpss_preview_chn_enabled_,
                            &vpss_preview_pool_attached_)) {
             std::cerr << "[WARN] CviCamera: preview channel (Chn"

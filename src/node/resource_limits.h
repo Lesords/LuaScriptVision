@@ -5,8 +5,8 @@
 namespace node {
 
 // SG2002 hardware resource limits
-constexpr int VB_POOL4_TOTAL = 4;              // Pool 4 (640x640 RGB) total blocks
-constexpr int VB_POOL3_TOTAL = 2;              // Pool 3 (640x640 RGB_PLANAR) total blocks
+constexpr int VB_POOL4_TOTAL = 3;              // Pool 4 (640x640 RGB) infer-only, 3 blocks (depth=2+hold=1)
+constexpr int VB_POOL3_TOTAL = 2;              // Pool 3 (640x640 RGB) VPSS-preprocess-only, 2 blocks
 constexpr int VB_BUFFER_RESERVE = 1;           // Reserved buffer for processing
 
 // Model topology limits (based on VB constraints)

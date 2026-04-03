@@ -749,7 +749,8 @@ void CviVpssProcessor::process_frame(Frame& frame, uint32_t out_width, uint32_t 
 VB_POOL CviVpssProcessor::select_output_pool(uint32_t width, uint32_t height, PixelFormat format) const {
     // find_pool handles RGB↔BGR fallback internally, so pass the exact format.
     if (MmfContext::instance().is_initialized()) {
-        VB_POOL pool = MmfContext::instance().vb_plan().find_pool(width, height, format);
+        VB_POOL pool = MmfContext::instance().vb_plan().find_pool(width, height, format,
+                                                                  VbPoolUsage::VPSS_PREPROCESS);
         if (pool != VB_INVALID_POOLID) {
             return pool;
         }
