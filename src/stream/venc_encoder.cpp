@@ -127,7 +127,9 @@ bool VencEncoder::init_h264() {
     chn_attr.stVencAttr.u32MaxPicHeight = config_.height;
     chn_attr.stVencAttr.u32PicWidth = config_.width;
     chn_attr.stVencAttr.u32PicHeight = config_.height;
-    chn_attr.stVencAttr.u32BufSize = config_.width * config_.height * 3 / 2;
+    // u32BufSize: compressed bitstream output buffer. Original w*h*3/2 (~3MB for 1080p)
+    // causes ION OOM when CVI model is loaded. w*h/2 (~1MB) is sufficient for 4000kbps.
+    chn_attr.stVencAttr.u32BufSize = config_.width * config_.height / 2;
     chn_attr.stVencAttr.u32Profile = H264E_PROFILE_HIGH;
     chn_attr.stVencAttr.bByFrame = CVI_TRUE;
     chn_attr.stVencAttr.bSingleCore = CVI_FALSE;
