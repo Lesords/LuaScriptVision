@@ -7,7 +7,6 @@
 #include "luaref_json.h"
 
 #ifdef USE_CVI_MPI
-#include "stream/venc_encoder.h"
 #include "modules/cv/cvi_vpss_processor.h"
 #endif
 
@@ -131,18 +130,15 @@ private:
     std::atomic<bool> infer_enabled_{true};
     std::unique_ptr<lua_cv::WebSocketTransport> ws_;
 
-    // Preview thread: hardware JPEG via VPSS Chn2 → VENC MJPEG Ch1.
-    // previewLoop polls jpeg_encoder_->get_stream() and broadcasts base64 JPEG over WebSocket.
+    // Preview thread: gets JPEG bytes from CameraNode, overlays inference results,
+    // and broadcasts base64 JPEG over WebSocket.
 #ifdef USE_CVI_MPI
-    std::unique_ptr<lua_cv::VencEncoder> jpeg_encoder_;
-    bool jpeg_encoder_init_failed_ = false;  // prevents infinite retry on permanent failures
     // Persistent VPSS preprocessor for inference: reused across frames to avoid per-frame
     // CVI_VPSS_CreateGrp/DestroyGrp which accumulates ION work buffers and causes OOM.
     std::unique_ptr<lua_cv::CviVpssProcessor> vpss_processor_;
 #endif
     std::thread preview_thread_;
     std::atomic<bool> preview_running_{false};
-    int preview_venc_channel_ = 1;  // VENC Ch1: reserved for model preview (Ch2=camera H264)
 
     // Latest inference result (mutex-protected): inferLoop writes, previewLoop reads.
     mutable std::mutex infer_result_mutex_;

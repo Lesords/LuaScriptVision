@@ -167,6 +167,9 @@ int CameraNode::onStart() {
 
 int CameraNode::onStop() {
 #ifdef USE_CVI_CAMERA
+    // Shutdown preview encoder first (ModelNodes may still reference it)
+    shutdownPreviewEncoder();
+
     // sscma-node compatibility: Stop stream encoder
     if (stream_encoder_.running.load(std::memory_order_acquire)) {
         stream_encoder_.running.store(false, std::memory_order_release);
@@ -200,6 +203,58 @@ int CameraNode::onStop() {
     event("enabled", MA_OK, false);
 
     return MA_OK;
+}
+
+void CameraNode::add_preview_subscriber(const std::string& node_id) {
+#ifdef USE_CVI_CAMERA
+    bool should_init = false;
+    {
+        std::lock_guard<std::mutex> lock(preview_sub_mutex_);
+        preview_subscribers_.insert(node_id);
+        should_init = preview_subscribers_.size() == 1;
+    }
+    if (should_init && !preview_encoder_.running.load(std::memory_order_acquire)) {
+        if (!initPreviewEncoder()) {
+            std::cerr << "[CameraNode] Preview encoder init failed for " << node_id << std::endl;
+        }
+    }
+#else
+    (void)node_id;
+#endif
+}
+
+void CameraNode::remove_preview_subscriber(const std::string& node_id) {
+#ifdef USE_CVI_CAMERA
+    bool should_shutdown = false;
+    {
+        std::lock_guard<std::mutex> lock(preview_sub_mutex_);
+        preview_subscribers_.erase(node_id);
+        should_shutdown = preview_subscribers_.empty();
+    }
+    if (should_shutdown && preview_encoder_.running.load(std::memory_order_acquire)) {
+        std::cout << "[CameraNode] Last preview subscriber removed, shutting down encoder" << std::endl;
+        shutdownPreviewEncoder();
+    }
+#else
+    (void)node_id;
+#endif
+}
+
+bool CameraNode::get_latest_jpeg(std::vector<uint8_t>& jpeg_data) {
+#ifdef USE_CVI_CAMERA
+    if (!preview_encoder_.jpeg_ready.load(std::memory_order_acquire)) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(preview_encoder_.jpeg_mutex);
+    if (preview_encoder_.latest_jpeg.empty()) {
+        return false;
+    }
+    jpeg_data = preview_encoder_.latest_jpeg;
+    return true;
+#else
+    (void)jpeg_data;
+    return false;
+#endif
 }
 
 void CameraNode::stopCapture() {
@@ -769,5 +824,95 @@ void CameraNode::streamEncodeLoop() {
         stream_encoder_.encoder->release_stream();
     }
 }
+
+// ========================================
+// MJPEG Preview encoder (VPSS Chn2 -> VENC Ch1)
+// Shared by all ModelNodes for JPEG preview.
+// ========================================
+bool CameraNode::initPreviewEncoder() {
+#ifdef USE_CVI_CAMERA
+    if (!camera_ || !camera_->vpss_preview_enabled()) {
+        std::cerr << "[CameraNode] Preview encoder: VPSS Chn2 not available" << std::endl;
+        return false;
+    }
+
+    lua_cv::VencEncoder::Config enc_cfg;
+    enc_cfg.codec = lua_cv::VencEncoder::CodecType::MJPEG;
+    enc_cfg.channel = 1;  // VENC Ch1: MJPEG preview (Ch0 unused, Ch2=H264 stream)
+    enc_cfg.width = lua_cv::MmfContext::camera_preview_width();
+    enc_cfg.height = lua_cv::MmfContext::camera_preview_height();
+    enc_cfg.fps = static_cast<uint32_t>(config_.fps);
+    enc_cfg.bitrate_kbps = 8000;
+
+    preview_encoder_.encoder = std::make_unique<lua_cv::VencEncoder>(enc_cfg);
+    if (!preview_encoder_.encoder->init()) {
+        std::cerr << "[CameraNode] Preview MJPEG encoder init failed" << std::endl;
+        preview_encoder_.encoder.reset();
+        return false;
+    }
+
+    int vpss_grp = camera_->vpss_group();
+    int vpss_chn = camera_->vpss_preview_channel();
+    if (!preview_encoder_.encoder->bind_to_vpss(
+            static_cast<VPSS_GRP>(vpss_grp),
+            static_cast<VPSS_CHN>(vpss_chn))) {
+        std::cerr << "[CameraNode] Preview MJPEG bind_to_vpss failed" << std::endl;
+        preview_encoder_.encoder->shutdown();
+        preview_encoder_.encoder.reset();
+        return false;
+    }
+
+    std::cout << "[CameraNode] Preview MJPEG encoder bound: VPSS["
+              << vpss_grp << "," << vpss_chn << "] -> VENC[1]" << std::endl;
+
+    preview_encoder_.running.store(true, std::memory_order_release);
+    preview_encoder_.encode_thread = std::thread(&CameraNode::previewEncodeLoop, this);
+    return true;
+#else
+    return false;
 #endif
+}
+
+void CameraNode::previewEncodeLoop() {
+#ifdef USE_CVI_MPI
+    while (preview_encoder_.running.load(std::memory_order_acquire)) {
+        lua_cv::VencEncoder::EncodedStream stream;
+        if (!preview_encoder_.encoder->get_stream(&stream, 50)) {
+            continue;
+        }
+
+        if (!stream.data.empty()) {
+            std::lock_guard<std::mutex> lock(preview_encoder_.jpeg_mutex);
+            preview_encoder_.latest_jpeg = std::move(stream.data);
+            preview_encoder_.jpeg_ready.store(true, std::memory_order_release);
+        }
+
+        preview_encoder_.encoder->release_stream();
+    }
+#endif
+}
+
+void CameraNode::shutdownPreviewEncoder() {
+#ifdef USE_CVI_CAMERA
+    if (preview_encoder_.running.load(std::memory_order_acquire)) {
+        preview_encoder_.running.store(false, std::memory_order_release);
+        if (preview_encoder_.encode_thread.joinable()) {
+            preview_encoder_.encode_thread.join();
+        }
+    }
+
+    if (preview_encoder_.encoder) {
+        preview_encoder_.encoder->shutdown();
+        preview_encoder_.encoder.reset();
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(preview_encoder_.jpeg_mutex);
+        preview_encoder_.latest_jpeg.clear();
+    }
+    preview_encoder_.jpeg_ready.store(false, std::memory_order_release);
+#endif
+}
+
+#endif  // USE_CVI_CAMERA
 } // namespace node

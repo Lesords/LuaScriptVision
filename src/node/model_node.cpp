@@ -316,43 +316,12 @@ int ModelNode::onStart() {
         bindUpstreamCamera();
     }
 
-    // Create hardware JPEG encoder (MJPEG VENC Ch1) and bind to VPSS Chn2.
-    // Requires camera to be started and preview channel (Chn2) to be available.
+    // Register with CameraNode's MJPEG preview encoder.
+    // CameraNode owns VENC Ch1 (MJPEG) bound to VPSS Chn2.
+    // First subscriber triggers encoder creation; last removal shuts it down.
 #ifdef USE_CVI_MPI
     if (upstream_camera_ && config_.websocket) {
-        int vpss_grp = -1, vpss_chn = -1;
-        if (upstream_camera_->get_preview_binding(&vpss_grp, &vpss_chn)) {
-            lua_cv::VencEncoder::Config enc_cfg;
-            enc_cfg.codec   = lua_cv::VencEncoder::CodecType::MJPEG;
-            enc_cfg.channel = static_cast<VENC_CHN>(preview_venc_channel_);
-            enc_cfg.width   = lua_cv::MmfContext::camera_preview_width();
-            enc_cfg.height  = lua_cv::MmfContext::camera_preview_height();
-            enc_cfg.fps     = static_cast<uint32_t>(config_.preview_fps);
-            enc_cfg.bitrate_kbps = 8000;  // 8Mbps for 1280×720 MJPEG (4× pixels vs old 640×360)
-            jpeg_encoder_ = std::make_unique<lua_cv::VencEncoder>(enc_cfg);
-            if (jpeg_encoder_->init()) {
-                if (jpeg_encoder_->bind_to_vpss(static_cast<VPSS_GRP>(vpss_grp),
-                                                static_cast<VPSS_CHN>(vpss_chn))) {
-                    std::cout << "[ModelNode] JPEG encoder bound to VPSS["
-                              << vpss_grp << "," << vpss_chn << "] ch="
-                              << preview_venc_channel_ << std::endl;
-                    event("websocket", MA_OK, {
-                        {"port", config_.ws_port},
-                        {"path", config_.ws_path},
-                        {"type", "jpeg"}
-                    });
-                } else {
-                    std::cerr << "[ModelNode] JPEG encoder bind_to_vpss failed" << std::endl;
-                    jpeg_encoder_->shutdown();
-                    jpeg_encoder_.reset();
-                }
-            } else {
-                std::cerr << "[ModelNode] JPEG encoder init failed" << std::endl;
-                jpeg_encoder_.reset();
-            }
-        } else {
-            std::cerr << "[ModelNode] No preview binding available (camera Chn2 not ready)" << std::endl;
-        }
+        upstream_camera_->add_preview_subscriber(id_);
     }
 #endif
 
@@ -417,11 +386,10 @@ int ModelNode::onStop() {
         preview_thread_.join();
     }
 
-    // Shutdown hardware JPEG encoder (unbinds from VPSS automatically)
+    // Unregister from CameraNode's MJPEG preview
 #ifdef USE_CVI_MPI
-    if (jpeg_encoder_) {
-        jpeg_encoder_->shutdown();
-        jpeg_encoder_.reset();
+    if (upstream_camera_) {
+        upstream_camera_->remove_preview_subscriber(id_);
     }
     vpss_processor_.reset();
 #endif
@@ -839,74 +807,22 @@ void ModelNode::cleanupLuaRef() {
 
 void ModelNode::previewLoop() {
 #ifdef USE_CVI_MPI
-    // Hardware path: poll VPSS Chn2 → VENC MJPEG Ch1
-    // VENC receives frames automatically via hardware binding (no CPU color conversion).
+    // JPEG bytes come from CameraNode's MJPEG encoder (VENC Ch1, VPSS Chn2).
+    // ModelNode only overlays inference results and broadcasts via WebSocket.
     while (preview_running_.load(std::memory_order_acquire)) {
-        if (!jpeg_encoder_ || !jpeg_encoder_->is_initialized()) {
-            // Lazy init: model_node may start before camera_node.
-            // Poll until camera is ready, then create and bind JPEG encoder.
-            if (!jpeg_encoder_ && !jpeg_encoder_init_failed_ && config_.websocket) {
-                CameraNode* cam = nullptr;
-                if (upstream_camera_) {
-                    cam = upstream_camera_;
-                } else {
-                    cam = NodeFactory::instance().find_camera_node();
-                    if (cam) upstream_camera_ = cam;
-                }
-                if (cam) {
-                    int vpss_grp = -1, vpss_chn = -1;
-                    if (cam->get_preview_binding(&vpss_grp, &vpss_chn)) {
-                        lua_cv::VencEncoder::Config enc_cfg;
-                        enc_cfg.codec        = lua_cv::VencEncoder::CodecType::MJPEG;
-                        enc_cfg.channel      = static_cast<VENC_CHN>(preview_venc_channel_);
-                        // Use VPSS Chn2 physical output dimensions, NOT the user's preview_width/height
-                        // (which is the frontend display resolution, not the hardware encoder size).
-                        enc_cfg.width        = lua_cv::MmfContext::camera_preview_width();
-                        enc_cfg.height       = lua_cv::MmfContext::camera_preview_height();
-                        enc_cfg.fps          = static_cast<uint32_t>(config_.preview_fps);
-                        enc_cfg.bitrate_kbps = 8000;  // 8Mbps for 1280×720 MJPEG (4× pixels vs old 640×360)
-                        jpeg_encoder_ = std::make_unique<lua_cv::VencEncoder>(enc_cfg);
-                        if (jpeg_encoder_->init()) {
-                            if (jpeg_encoder_->bind_to_vpss(static_cast<VPSS_GRP>(vpss_grp),
-                                                            static_cast<VPSS_CHN>(vpss_chn))) {
-                                std::cout << "[ModelNode] JPEG encoder lazy-init bound to VPSS["
-                                          << vpss_grp << "," << vpss_chn << "] ch="
-                                          << preview_venc_channel_ << std::endl;
-                                event("websocket", MA_OK, {
-                                    {"port", config_.ws_port},
-                                    {"path", config_.ws_path},
-                                    {"type", "jpeg"}
-                                });
-                            } else {
-                                std::cerr << "[ModelNode] JPEG encoder lazy bind_to_vpss failed" << std::endl;
-                                jpeg_encoder_->shutdown();
-                                jpeg_encoder_.reset();
-                                jpeg_encoder_init_failed_ = true;
-                            }
-                        } else {
-                            std::cerr << "[ModelNode] JPEG encoder lazy init failed" << std::endl;
-                            jpeg_encoder_.reset();
-                            jpeg_encoder_init_failed_ = true;
-                        }
-                    }
-                }
-            }
+        // Get JPEG data from CameraNode
+        std::vector<uint8_t> jpeg_data;
+        CameraNode* cam = upstream_camera_;
+        if (!cam) {
+            cam = NodeFactory::instance().find_camera_node();
+            if (cam) upstream_camera_ = cam;
+        }
+        if (!cam || !cam->get_latest_jpeg(jpeg_data)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             continue;
         }
 
-        lua_cv::VencEncoder::EncodedStream stream;
-        if (!jpeg_encoder_->get_stream(&stream, 50)) {
-            continue;
-        }
-
-        if (stream.data.empty()) {
-            jpeg_encoder_->release_stream();
-            continue;
-        }
-
         if (!preview_running_.load(std::memory_order_acquire)) {
-            jpeg_encoder_->release_stream();
             break;
         }
 
@@ -916,15 +832,14 @@ void ModelNode::previewLoop() {
             auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 now - last_preview_time_).count();
             if (elapsed_ms < preview_interval_ms_) {
-                jpeg_encoder_->release_stream();
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 continue;
             }
         }
         last_preview_time_ = now;
 
-        // base64-encode raw JPEG bytes directly — no OpenCV needed
-        std::string b64 = base64_encode_stream(stream.data.data(), stream.data.size());
-        jpeg_encoder_->release_stream();
+        // base64-encode raw JPEG bytes
+        std::string b64 = base64_encode_stream(jpeg_data.data(), jpeg_data.size());
 
         if (!ws_ || b64.empty()) continue;
 
@@ -932,8 +847,10 @@ void ModelNode::previewLoop() {
         nlohmann::json event_data;
         { std::lock_guard<std::mutex> lock(infer_result_mutex_); event_data = latest_infer_result_; }
 
-        nlohmann::json preview_data = build_preview_json(event_data, b64,
-            jpeg_encoder_->config().width, jpeg_encoder_->config().height);
+        // Use camera preview dimensions for coordinate mapping
+        int preview_w = cam->config_width();
+        int preview_h = cam->config_height();
+        nlohmann::json preview_data = build_preview_json(event_data, b64, preview_w, preview_h);
         std::string payload = nlohmann::json{{"data", preview_data}}
             .dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
 

@@ -10,6 +10,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <thread>
 #include <vector>
 
@@ -74,6 +75,16 @@ public:
     bool get_infer_binding(int* vpss_grp, int* vpss_chn) const;
     bool get_preview_binding(int* vpss_grp, int* vpss_chn) const;  // Chn2 → VENC MJPEG
 
+    // MJPEG preview: subscriber-based lifecycle.
+    // ModelNode calls add_preview_subscriber() on start, remove on stop.
+    // First subscriber triggers MJPEG encoder creation; last removal shuts it down.
+    void add_preview_subscriber(const std::string& node_id);
+    void remove_preview_subscriber(const std::string& node_id);
+
+    // Get the latest MJPEG-encoded frame. Returns false if encoder not running.
+    // Thread-safe; copies data into output vector.
+    bool get_latest_jpeg(std::vector<uint8_t>& jpeg_data);
+
     // Configuration access (for ModelNode coordinate mapping)
     int config_width() const { return config_.width; }
     int config_height() const { return config_.height; }
@@ -111,6 +122,19 @@ private:
         std::unique_ptr<lua_cv::WebSocketTransport> ws;
         std::thread encode_thread;
     } stream_encoder_;
+
+    // Preview encoder (MJPEG VPSS Chn2 -> VENC Ch1, shared by all ModelNodes)
+    struct PreviewEncoder {
+        std::atomic<bool> running{false};
+        std::unique_ptr<lua_cv::VencEncoder> encoder;
+        std::thread encode_thread;
+        // Latest JPEG data (written by encode thread, read by ModelNodes)
+        std::vector<uint8_t> latest_jpeg;
+        std::mutex jpeg_mutex;
+        std::atomic<bool> jpeg_ready{false};
+    } preview_encoder_;
+    std::set<std::string> preview_subscribers_;
+    mutable std::mutex preview_sub_mutex_;
 #endif
 
     // Capture thread
@@ -190,6 +214,11 @@ private:
     // Stream encoder methods (sscma-node compatibility)
     bool initStreamEncoder();
     void streamEncodeLoop();
+
+    // Preview encoder methods (MJPEG for ModelNode preview)
+    bool initPreviewEncoder();
+    void previewEncodeLoop();
+    void shutdownPreviewEncoder();
 #endif
 };
 
