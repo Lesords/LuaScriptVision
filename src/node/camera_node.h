@@ -83,7 +83,8 @@ public:
 
     // Get the latest MJPEG-encoded frame. Returns false if encoder not running.
     // Thread-safe; copies data into output vector.
-    bool get_latest_jpeg(std::vector<uint8_t>& jpeg_data);
+    // If out_generation is non-null, returns the current generation counter.
+    bool get_latest_jpeg(std::vector<uint8_t>& jpeg_data, uint64_t* out_generation = nullptr);
 
     // Configuration access (for ModelNode coordinate mapping)
     int config_width() const { return config_.width; }
@@ -132,6 +133,7 @@ private:
         std::vector<uint8_t> latest_jpeg;
         std::mutex jpeg_mutex;
         std::atomic<bool> jpeg_ready{false};
+        std::atomic<uint64_t> generation{0};  // incremented each time a new JPEG is stored
     } preview_encoder_;
     std::set<std::string> preview_subscribers_;
     mutable std::mutex preview_sub_mutex_;

@@ -240,7 +240,7 @@ void CameraNode::remove_preview_subscriber(const std::string& node_id) {
 #endif
 }
 
-bool CameraNode::get_latest_jpeg(std::vector<uint8_t>& jpeg_data) {
+bool CameraNode::get_latest_jpeg(std::vector<uint8_t>& jpeg_data, uint64_t* out_generation) {
 #ifdef USE_CVI_CAMERA
     if (!preview_encoder_.jpeg_ready.load(std::memory_order_acquire)) {
         return false;
@@ -250,9 +250,13 @@ bool CameraNode::get_latest_jpeg(std::vector<uint8_t>& jpeg_data) {
         return false;
     }
     jpeg_data = preview_encoder_.latest_jpeg;
+    if (out_generation) {
+        *out_generation = preview_encoder_.generation.load(std::memory_order_acquire);
+    }
     return true;
 #else
     (void)jpeg_data;
+    (void)out_generation;
     return false;
 #endif
 }
@@ -885,6 +889,7 @@ void CameraNode::previewEncodeLoop() {
             std::lock_guard<std::mutex> lock(preview_encoder_.jpeg_mutex);
             preview_encoder_.latest_jpeg = std::move(stream.data);
             preview_encoder_.jpeg_ready.store(true, std::memory_order_release);
+            preview_encoder_.generation.fetch_add(1, std::memory_order_release);
         }
 
         preview_encoder_.encoder->release_stream();

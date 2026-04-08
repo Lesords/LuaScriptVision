@@ -139,6 +139,7 @@ private:
 #endif
     std::thread preview_thread_;
     std::atomic<bool> preview_running_{false};
+    uint64_t last_preview_generation_ = 0;  // tracks last processed JPEG generation
 
     // Latest inference result (mutex-protected): inferLoop writes, previewLoop reads.
     mutable std::mutex infer_result_mutex_;
@@ -153,7 +154,7 @@ private:
     std::atomic<uint64_t> ws_event_count_{0};
     std::atomic<uint64_t> stream_frame_count_{0};  // Preview frames successfully sent
     std::chrono::steady_clock::time_point last_preview_time_{};
-    int preview_interval_ms_;
+    int preview_interval_ms_ = 66;  // ~15fps default (1000/15)
     double infer_ema_ms_ = 0.0;
     static constexpr double kEmaAlpha = 0.2;
 };

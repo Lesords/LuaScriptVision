@@ -144,6 +144,7 @@ void ModelNode::parsePreviewConfig(const nlohmann::json& config) {
             config_.preview_fps = 15;
         }
     }
+    preview_interval_ms_ = 1000 / config_.preview_fps;
 }
 
 int ModelNode::initializeSession() {
@@ -817,10 +818,18 @@ void ModelNode::previewLoop() {
             cam = NodeFactory::instance().find_camera_node();
             if (cam) upstream_camera_ = cam;
         }
-        if (!cam || !cam->get_latest_jpeg(jpeg_data)) {
+        uint64_t gen = 0;
+        if (!cam || !cam->get_latest_jpeg(jpeg_data, &gen)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(50));
             continue;
         }
+
+        // Skip if same frame as last time
+        if (gen == last_preview_generation_) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+        last_preview_generation_ = gen;
 
         if (!preview_running_.load(std::memory_order_acquire)) {
             break;
