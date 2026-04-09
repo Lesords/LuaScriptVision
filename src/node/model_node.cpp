@@ -58,8 +58,12 @@ int ModelNode::parseConfig(const nlohmann::json& config) {
     }
 #endif
 
-    if (config.contains("script")) {
+    if (config.contains("script") && !config.at("script").get<std::string>().empty()) {
         config_.script_path = config.at("script");
+        // Auto-complete relative script names to /userdata/scripts/
+        if (config_.script_path[0] != '/') {
+            config_.script_path = "/userdata/scripts/" + config_.script_path;
+        }
     } else {
         config_.script_path = "/userdata/scripts/yolo11_tensor_detector.lua";
     }
