@@ -41,21 +41,53 @@ Model.preprocess_config = {
 
 -- 使用向量化Tensor操作实现姿态估计后处理（方案3 - 极致性能）
 function Model.postprocess(outputs, meta)
+    local t0 = os.clock()
+
     local output = outputs["output0"]
 
     if not output then
         error("Missing output0")
     end
 
-    -- YOLO11-Pose格式: [1, 56, 8400]
+    -- YOLO11-Pose格式: [1, 56, 8400] 或 [56, 8400]
     -- 4个box坐标 + 1个person类别分数 + 51个关键点数据(17个点*3: x,y,conf)
     local num_kpt = Model.config.num_keypoints
+    local shape = output:shape()
 
-    -- 1. 分离boxes, scores, keypoints
-    -- 关键优化：立即调用contiguous()确保后续操作高效
-    local boxes = output:slice(1, 0, 4, 1):squeeze(0):contiguous()  -- [4, 8400]
-    local person_scores = output:slice(1, 4, 5, 1):squeeze(0):squeeze(0):contiguous()  -- [8400]
-    local keypoints = output:slice(1, 5, 56, 1):squeeze(0):contiguous()  -- [51, 8400]
+    -- Normalize to 2D [channels, anchors] format
+    -- Handles: [1, 56, 8400], [56, 8400], [1, 56, 8400, 1], [8400, 56]
+    local channels, anchors
+
+    if #shape == 4 then
+        -- [1, C, N, 1] → squeeze batch & trailing dims
+        output = output:squeeze(0):squeeze(-1):contiguous()  -- [C, N]
+        channels, anchors = shape[2], shape[3]
+    elseif #shape == 3 then
+        if shape[2] < shape[3] then
+            output = output:squeeze(0)  -- [C, N]
+            channels, anchors = shape[2], shape[3]
+        else
+            output = output:squeeze(0):transpose(0, 1):contiguous()  -- [C, N]
+            channels, anchors = shape[3], shape[2]
+        end
+    elseif #shape == 2 then
+        if shape[1] < shape[2] then
+            channels, anchors = shape[1], shape[2]
+        else
+            output = output:transpose(0, 1):contiguous()
+            channels, anchors = shape[2], shape[1]
+        end
+    else
+        error(string.format("Unexpected output shape: [%s]", table.concat(shape, ", ")))
+    end
+
+    -- 1. 分离boxes, scores, keypoints from [channels, anchors]
+    local boxes = output:slice(0, 0, 4, 1):contiguous()           -- [4, anchors]
+    local person_scores = output:slice(0, 4, 5, 1):reshape({anchors}):contiguous()  -- [anchors]
+    local kpt_channels = num_kpt * 3  -- 51
+    local keypoints = output:slice(0, 5, 5 + kpt_channels, 1):contiguous()  -- [51, anchors]
+
+    local t1 = os.clock()
 
     -- 2. 向量化过滤：找出满足条件的索引
     local valid_indices = person_scores:where_indices(Model.config.conf_thres, "ge")
@@ -126,9 +158,26 @@ function Model.postprocess(outputs, meta)
     
     -- 4. NMS
     local final_boxes = utils.nms(proposals, Model.config.iou_thres)
-    
-    print(string.format("NMS后最终框: %d", #final_boxes))
-    
+
+    local t2 = os.clock()
+
+    -- Debug: print first box + first 3 keypoints to verify coordinates
+    if #final_boxes > 0 then
+        local b = final_boxes[1]
+        print(string.format("[Pose] tensor:%.1fms total:%.1fms box: %.0f,%.0f,%.0f,%.0f res:%dx%d",
+              (t1 - t0) * 1000, (t2 - t0) * 1000, b.x, b.y, b.w, b.h,
+              meta.ori_w or 0, meta.ori_h or 0))
+        local kpts = b.keypoints
+        if kpts and #kpts >= 3 then
+            print(string.format("  kpt[1]=%.1f,%.1f kpt[2]=%.1f,%.1f kpt[6]=%.1f,%.1f",
+                  kpts[1].x, kpts[1].y, kpts[2].x, kpts[2].y,
+                  kpts[6].x, kpts[6].y))
+        end
+    else
+        print(string.format("[Pose] tensor:%.1fms total:%.1fms boxes:0",
+              (t1 - t0) * 1000, (t2 - t0) * 1000))
+    end
+
     return final_boxes
 end
 
