@@ -626,6 +626,26 @@ nlohmann::json ModelNode::runFullFrameInference(const lua_cv::Frame& frame,
     if (upstream_camera_) {
         meta_frame_w = upstream_camera_->config_width();
         meta_frame_h = upstream_camera_->config_height();
+
+        // Camera VPSS pre-scales frames (e.g. 1920x1080 → 640x640) before
+        // they reach the executor, so the executor's letterbox meta reflects
+        // only the executor's own transform (640→640 = identity).  Override
+        // with camera dimensions so Lua scale_coords can map model coords
+        // back to the original camera resolution.
+        int cam_w = upstream_camera_->config_width();
+        int cam_h = upstream_camera_->config_height();
+        if (cam_w != frame.width() || cam_h != frame.height()) {
+            auto& pm = execution.preprocess_meta;
+            pm.ori_w = cam_w;
+            pm.ori_h = cam_h;
+            pm.scale_x = static_cast<float>(pm.input_w) /
+                         static_cast<float>(std::max(1, cam_w));
+            pm.scale_y = static_cast<float>(pm.input_h) /
+                         static_cast<float>(std::max(1, cam_h));
+            pm.scale = pm.scale_x;
+            pm.pad_x = 0;
+            pm.pad_y = 0;
+        }
     }
     nlohmann::json meta = build_full_frame_meta(
         upstream,

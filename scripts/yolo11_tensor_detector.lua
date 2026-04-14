@@ -237,8 +237,9 @@ function Model.postprocess(outputs, meta)
     -- Scale coordinates back to original image
     for _, box in ipairs(proposals) do
         box.x, box.y = preprocess_lib.scale_coords(box.x, box.y, meta)
-        box.w = preprocess_lib.scale_size(box.w, meta)
-        box.h = preprocess_lib.scale_size(box.h, meta)
+        box.w = preprocess_lib.scale_size_w(box.w, meta)
+        box.h = preprocess_lib.scale_size_h(box.h, meta)
+        preprocess_lib.clamp_box(box, meta)
     end
 
     -- Apply NMS

@@ -62,15 +62,47 @@ end
 
 -- 坐标缩放和去padding
 -- 将模型输出的坐标转换回原始图片坐标
+-- 支持非均匀缩放 (scale_x != scale_y, 如camera VPSS resize)
 function M.scale_coords(x, y, meta)
-    local scaled_x = (x - meta.pad_x) / meta.scale
-    local scaled_y = (y - meta.pad_y) / meta.scale
+    local sx = meta.scale_x or meta.scale
+    local sy = meta.scale_y or meta.scale
+    local scaled_x = (x - (meta.pad_x or 0)) / sx
+    local scaled_y = (y - (meta.pad_y or 0)) / sy
     return scaled_x, scaled_y
 end
 
--- 尺寸缩放（用于width/height）
+-- 宽度缩放（用于box的w）
+function M.scale_size_w(size, meta)
+    return size / (meta.scale_x or meta.scale)
+end
+
+-- 高度缩放（用于box的h）
+function M.scale_size_h(size, meta)
+    return size / (meta.scale_y or meta.scale)
+end
+
+-- 通用尺寸缩放（向后兼容，均匀缩放场景）
 function M.scale_size(size, meta)
     return size / meta.scale
+end
+
+-- 边界裁剪：确保框和关键点不超出图片范围
+function M.clamp_box(box, meta)
+    local ori_w = meta.ori_w or meta.frame_width or 0
+    local ori_h = meta.ori_h or meta.frame_height or 0
+    if ori_w <= 0 or ori_h <= 0 then return end
+
+    box.x = math.max(0, math.min(box.x, ori_w - 1))
+    box.y = math.max(0, math.min(box.y, ori_h - 1))
+    if box.x + box.w > ori_w then box.w = ori_w - box.x end
+    if box.y + box.h > ori_h then box.h = ori_h - box.y end
+
+    if box.keypoints then
+        for _, kpt in ipairs(box.keypoints) do
+            kpt.x = math.max(0, math.min(kpt.x, ori_w - 1))
+            kpt.y = math.max(0, math.min(kpt.y, ori_h - 1))
+        end
+    end
 end
 
 return M

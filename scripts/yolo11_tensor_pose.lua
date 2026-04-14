@@ -147,13 +147,16 @@ function Model.postprocess(outputs, meta)
     -- 3. 坐标还原(包括关键点，使用公共库函数)
     for _, box in ipairs(proposals) do
         box.x, box.y = preprocess_lib.scale_coords(box.x, box.y, meta)
-        box.w = preprocess_lib.scale_size(box.w, meta)
-        box.h = preprocess_lib.scale_size(box.h, meta)
+        box.w = preprocess_lib.scale_size_w(box.w, meta)
+        box.h = preprocess_lib.scale_size_h(box.h, meta)
 
         -- 还原关键点坐标
         for _, kpt in ipairs(box.keypoints) do
             kpt.x, kpt.y = preprocess_lib.scale_coords(kpt.x, kpt.y, meta)
         end
+
+        -- 边界裁剪
+        preprocess_lib.clamp_box(box, meta)
     end
     
     -- 4. NMS

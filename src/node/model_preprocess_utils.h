@@ -12,6 +12,8 @@ namespace node {
 
 struct PreprocessMeta {
     float scale = 1.0f;
+    float scale_x = 1.0f;  // Separate x/y scales for non-uniform resize (e.g. camera VPSS)
+    float scale_y = 1.0f;
     int pad_x = 0;
     int pad_y = 0;
     int ori_w = 0;

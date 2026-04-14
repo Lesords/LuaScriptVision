@@ -60,6 +60,7 @@ void populate_preview_boxes(const nlohmann::json& event_data, nlohmann::json* pr
 
     nlohmann::json boxes_arr = nlohmann::json::array();
     nlohmann::json labels_arr = nlohmann::json::array();
+    nlohmann::json keypoints_arr = nlohmann::json::array();
     for (const auto& box : event_data["boxes"]) {
         if (!box.is_object()) {
             continue;
@@ -72,10 +73,28 @@ void populate_preview_boxes(const nlohmann::json& event_data, nlohmann::json* pr
         int cls = box.value("class_id", 0);
         boxes_arr.push_back({x, y, w, h, score, cls});
         labels_arr.push_back(box.value("label", ""));
+
+        // Pose keypoints: convert from [{x,y,v,name},...] to [[x,y,v,idx],...]
+        // and wrap as [box_array, points_array] per-person for frontend rendering
+        if (box.contains("keypoints") && box["keypoints"].is_array()) {
+            nlohmann::json points = nlohmann::json::array();
+            int idx = 0;
+            for (const auto& kpt : box["keypoints"]) {
+                double kx = kpt.value("x", 0.0);
+                double ky = kpt.value("y", 0.0);
+                double kv = kpt.value("v", 0.0);
+                points.push_back({kx, ky, kv, idx});
+                idx++;
+            }
+            keypoints_arr.push_back({{x, y, w, h, score, cls}, points});
+        }
     }
 
     (*preview_data)["boxes"] = std::move(boxes_arr);
     (*preview_data)["labels"] = std::move(labels_arr);
+    if (!keypoints_arr.empty()) {
+        (*preview_data)["keypoints"] = std::move(keypoints_arr);
+    }
 }
 
 std::string encode_preview_image(const lua_cv::Frame& frame,

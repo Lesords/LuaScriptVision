@@ -38,6 +38,8 @@ PreprocessMeta compute_letterbox_meta(int ori_w, int ori_h,
     int top = center ? pad_h / 2 : 0;
 
     meta.scale = r;
+    meta.scale_x = r;
+    meta.scale_y = r;
     meta.pad_x = left;
     meta.pad_y = top;
     return meta;
@@ -48,6 +50,8 @@ void fill_meta_json(const PreprocessMeta& meta, nlohmann::json* out) {
         return;
     }
     (*out)["scale"] = meta.scale;
+    (*out)["scale_x"] = meta.scale_x;
+    (*out)["scale_y"] = meta.scale_y;
     (*out)["pad_x"] = meta.pad_x;
     (*out)["pad_y"] = meta.pad_y;
     (*out)["ori_w"] = meta.ori_w;

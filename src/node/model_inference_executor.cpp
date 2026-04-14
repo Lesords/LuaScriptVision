@@ -27,8 +27,11 @@ void fill_resize_meta(int source_w,
                       int target_w,
                       int target_h,
                       PreprocessMeta* meta) {
-    meta->scale = static_cast<float>(target_w) /
-                  static_cast<float>(std::max(1, source_w));
+    meta->scale_x = static_cast<float>(target_w) /
+                    static_cast<float>(std::max(1, source_w));
+    meta->scale_y = static_cast<float>(target_h) /
+                    static_cast<float>(std::max(1, source_h));
+    meta->scale = meta->scale_x;
     meta->pad_x = 0;
     meta->pad_y = 0;
     meta->ori_w = source_w;
