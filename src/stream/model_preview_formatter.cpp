@@ -53,7 +53,9 @@ std::string base64_encode(const unsigned char* data, size_t len) {
     return ret;
 }
 
-void populate_preview_boxes(const nlohmann::json& event_data, nlohmann::json* preview_data) {
+void populate_preview_boxes(const nlohmann::json& event_data, nlohmann::json* preview_data,
+                            double scale_x = 1.0, double scale_y = 1.0,
+                            int clamp_w = 0, int clamp_h = 0) {
     if (!preview_data || !event_data.contains("boxes") || !event_data["boxes"].is_array()) {
         return;
     }
@@ -65,13 +67,30 @@ void populate_preview_boxes(const nlohmann::json& event_data, nlohmann::json* pr
         if (!box.is_object()) {
             continue;
         }
-        double x = box.value("x", 0.0);
-        double y = box.value("y", 0.0);
-        double w = box.value("w", 0.0);
-        double h = box.value("h", 0.0);
+        // Lua outputs top-left (x, y, w, h), but the frontend expects
+        // center-based coordinates (cx, cy, w, h) and draws at cx - w/2.
+        // Convert back to center format here. All values are in camera space,
+        // so scale to preview space first, then convert to center.
+        double tl_x = box.value("x", 0.0) * scale_x;
+        double tl_y = box.value("y", 0.0) * scale_y;
+        double w = box.value("w", 0.0) * scale_x;
+        double h = box.value("h", 0.0) * scale_y;
+        double cx = tl_x + w / 2.0;
+        double cy = tl_y + h / 2.0;
         double score = box.value("score", 0.0);
         int cls = box.value("class_id", 0);
-        boxes_arr.push_back({x, y, w, h, score, cls});
+
+        // Clamp to preview image bounds
+        if (clamp_w > 0 && clamp_h > 0) {
+            double half_w = w / 2.0;
+            double half_h = h / 2.0;
+            cx = std::max(half_w, std::min(cx, static_cast<double>(clamp_w) - half_w));
+            cy = std::max(half_h, std::min(cy, static_cast<double>(clamp_h) - half_h));
+            w = std::min(w, static_cast<double>(clamp_w));
+            h = std::min(h, static_cast<double>(clamp_h));
+        }
+
+        boxes_arr.push_back({cx, cy, w, h, score, cls});
         labels_arr.push_back(box.value("label", ""));
 
         // Pose keypoints: convert from [{x,y,v,name},...] to [[x,y,v,idx],...]
@@ -80,13 +99,15 @@ void populate_preview_boxes(const nlohmann::json& event_data, nlohmann::json* pr
             nlohmann::json points = nlohmann::json::array();
             int idx = 0;
             for (const auto& kpt : box["keypoints"]) {
-                double kx = kpt.value("x", 0.0);
-                double ky = kpt.value("y", 0.0);
+                double kx = kpt.value("x", 0.0) * scale_x;
+                double ky = kpt.value("y", 0.0) * scale_y;
+                if (clamp_w > 0) kx = std::max(0.0, std::min(kx, static_cast<double>(clamp_w)));
+                if (clamp_h > 0) ky = std::max(0.0, std::min(ky, static_cast<double>(clamp_h)));
                 double kv = kpt.value("v", 0.0);
                 points.push_back({kx, ky, kv, idx});
                 idx++;
             }
-            keypoints_arr.push_back({{x, y, w, h, score, cls}, points});
+            keypoints_arr.push_back({{cx, cy, w, h, score, cls}, points});
         }
     }
 
@@ -127,11 +148,16 @@ std::string base64_encode_stream(const uint8_t* data, size_t len) {
 }
 
 // Public: build preview JSON from pre-encoded base64 JPEG + inference boxes
+// Coordinates are scaled from src dimensions to the preview JPEG dimensions.
 nlohmann::json build_preview_json(const nlohmann::json& event_data,
                                   const std::string& base64_jpeg,
-                                  uint32_t width, uint32_t height) {
+                                  uint32_t width, uint32_t height,
+                                  uint32_t src_width, uint32_t src_height) {
     nlohmann::json preview_data = nlohmann::json::object();
-    populate_preview_boxes(event_data, &preview_data);
+    double sx = (src_width > 0 && width > 0) ? static_cast<double>(width) / src_width : 1.0;
+    double sy = (src_height > 0 && height > 0) ? static_cast<double>(height) / src_height : 1.0;
+    populate_preview_boxes(event_data, &preview_data, sx, sy,
+                           static_cast<int>(width), static_cast<int>(height));
     preview_data["resolution"] = {width, height};
     preview_data["image"] = base64_jpeg;
     return preview_data;

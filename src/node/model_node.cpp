@@ -880,10 +880,19 @@ void ModelNode::previewLoop() {
         nlohmann::json event_data;
         { std::lock_guard<std::mutex> lock(infer_result_mutex_); event_data = latest_infer_result_; }
 
-        // Use camera preview dimensions for coordinate mapping
-        int preview_w = cam->config_width();
-        int preview_h = cam->config_height();
-        nlohmann::json preview_data = build_preview_json(event_data, b64, preview_w, preview_h);
+        // Preview JPEG comes from VPSS Chn2 at camera_preview dimensions (e.g. 1280×720).
+        // Box coordinates are in camera config space (e.g. 1920×1080).
+        // build_preview_json scales coordinates from camera space to preview space.
+#ifdef USE_CVI_MPI
+        uint32_t jpeg_w = lua_cv::MmfContext::camera_preview_width();
+        uint32_t jpeg_h = lua_cv::MmfContext::camera_preview_height();
+#else
+        uint32_t jpeg_w = cam->config_width();
+        uint32_t jpeg_h = cam->config_height();
+#endif
+        nlohmann::json preview_data = build_preview_json(
+            event_data, b64, jpeg_w, jpeg_h,
+            cam->config_width(), cam->config_height());
         std::string payload = nlohmann::json{{"data", preview_data}}
             .dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
 

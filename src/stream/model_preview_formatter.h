@@ -25,9 +25,12 @@ struct ModelPreviewFormatConfig {
 std::string base64_encode_stream(const uint8_t* data, size_t len);
 
 // Build preview JSON payload from pre-encoded base64 JPEG + inference boxes
+// src_width/src_height: coordinate space of the box data (e.g. camera resolution)
+// width/height: actual preview JPEG dimensions
 nlohmann::json build_preview_json(const nlohmann::json& event_data,
                                   const std::string& base64_jpeg,
-                                  uint32_t width, uint32_t height);
+                                  uint32_t width, uint32_t height,
+                                  uint32_t src_width, uint32_t src_height);
 
 nlohmann::json build_model_preview_message(
     const nlohmann::json& event_data,
