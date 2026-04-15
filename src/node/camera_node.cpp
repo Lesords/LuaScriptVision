@@ -196,6 +196,7 @@ int CameraNode::onStop() {
 #ifdef USE_CVI_CAMERA
     if (camera_) {
         camera_->release();
+        camera_.reset();  // Prevent double-release if onStop() is called again
     }
 #endif
 
@@ -269,10 +270,9 @@ void CameraNode::stopCapture() {
 }
 
 int CameraNode::onDestroy() {
-    onStop();
-
+    // onStop() already called by Node::destroy()
 #ifdef USE_CVI_CAMERA
-    camera_.reset();
+    // camera_.reset() already done in onStop() after release()
     cleanupVbPools();
 #endif
 

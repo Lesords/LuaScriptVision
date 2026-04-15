@@ -201,73 +201,82 @@ Node* NodeFactory::get(const std::string& id) {
 }
 
 int NodeFactory::destroy(const std::string& id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<std::unique_ptr<Node>> to_destroy;
 
-    auto it = nodes_.find(id);
-    if (it == nodes_.end()) {
-        return MA_ENOENT;
-    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
 
-    Node* node = it->second.get();
-
-    // Collect all dependents first (recursive)
-    std::vector<std::string> to_destroy;
-    collectDependents(node, to_destroy);
-
-    // Destroy dependents first (reverse dependency order)
-    for (const auto& dep_id : to_destroy) {
-        auto dep_it = nodes_.find(dep_id);
-        if (dep_it != nodes_.end()) {
-            // Teardown data flow before destroying
-            if (auto* data_node = dynamic_cast<DataNode*>(dep_it->second.get())) {
-                teardownDataFlow(data_node);
-            }
-
-            dep_it->second->destroy();
-
-            // Update singleton tracking
-            const auto& dep_type = dep_it->second->type();
-            auto reg_it = registry_.find(dep_type);
-            if (reg_it != registry_.end() && reg_it->second.singleton) {
-                singleton_instances_.erase(dep_type);
-            }
-
-            // Resource tracking
-            ResourceEstimator::instance().on_node_stopped(dep_id);
-
-            nodes_.erase(dep_it);
+        auto it = nodes_.find(id);
+        if (it == nodes_.end()) {
+            return MA_ENOENT;
         }
+
+        Node* node = it->second.get();
+
+        // Collect all dependents first (recursive)
+        std::vector<std::string> dep_ids;
+        collectDependents(node, dep_ids);
+
+        // Take ownership of dependent nodes from map (under lock)
+        for (const auto& dep_id : dep_ids) {
+            auto dep_it = nodes_.find(dep_id);
+            if (dep_it != nodes_.end()) {
+                // Teardown data flow before removing
+                if (auto* data_node = dynamic_cast<DataNode*>(dep_it->second.get())) {
+                    teardownDataFlow(data_node);
+                }
+
+                // Update singleton tracking
+                const auto& dep_type = dep_it->second->type();
+                auto reg_it = registry_.find(dep_type);
+                if (reg_it != registry_.end() && reg_it->second.singleton) {
+                    singleton_instances_.erase(dep_type);
+                }
+
+                // Resource tracking
+                ResourceEstimator::instance().on_node_stopped(dep_id);
+
+                to_destroy.push_back(std::move(dep_it->second));
+                nodes_.erase(dep_it);
+            }
+        }
+
+        // Teardown data flow for target node
+        if (auto* data_node = dynamic_cast<DataNode*>(node)) {
+            teardownDataFlow(data_node);
+        }
+
+        // Update singleton tracking
+        auto reg_it = registry_.find(node->type());
+        if (reg_it != registry_.end() && reg_it->second.singleton) {
+            singleton_instances_.erase(node->type());
+        }
+
+        // Resource tracking
+        ResourceEstimator::instance().on_node_stopped(id);
+        if (node->type() == "camera") {
+            ResourceEstimator::instance().unregister_camera(id);
+        }
+
+        // Take ownership of target node
+        to_destroy.push_back(std::move(it->second));
+        nodes_.erase(it);
+
+        // Clean up pending dependencies for this node
+        pending_dependencies_.erase(id);
+        for (auto& [node_id, deps] : pending_dependencies_) {
+            deps.erase(std::remove(deps.begin(), deps.end(), id), deps.end());
+        }
+
+    }  // ← Factory lock released here
+
+    // Actual destruction outside the lock (join threads, release hardware)
+    // Must call destroy() explicitly: it stops threads via stop()→onStop() and
+    // releases resources via onDestroy(). ~Node() is default and does nothing.
+    for (auto& node_ptr : to_destroy) {
+        node_ptr->destroy();
     }
-
-    // Teardown data flow for this node
-    if (auto* data_node = dynamic_cast<DataNode*>(node)) {
-        teardownDataFlow(data_node);
-    }
-
-    // Destroy this node
-    node->destroy();
-
-    // Update singleton tracking
-    auto reg_it = registry_.find(node->type());
-    if (reg_it != registry_.end() && reg_it->second.singleton) {
-        singleton_instances_.erase(node->type());
-    }
-
-    // Resource tracking
-    ResourceEstimator::instance().on_node_stopped(id);
-    if (node->type() == "camera") {
-        ResourceEstimator::instance().unregister_camera(id);
-    }
-
-    nodes_.erase(it);
-
-    // Clean up pending dependencies for this node
-    pending_dependencies_.erase(id);
-
-    // Also remove this node from other nodes' pending dependencies
-    for (auto& [node_id, deps] : pending_dependencies_) {
-        deps.erase(std::remove(deps.begin(), deps.end(), id), deps.end());
-    }
+    to_destroy.clear();
 
     return MA_OK;
 }

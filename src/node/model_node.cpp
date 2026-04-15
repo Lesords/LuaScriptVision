@@ -409,12 +409,13 @@ int ModelNode::onStop() {
     ResourceEstimator::instance().on_node_stopped(id_);
     event("enabled", MA_OK, false);
 
+    // Clear dangling pointer - threads are already joined above
+    upstream_camera_ = nullptr;
+
     return MA_OK;
 }
 
 int ModelNode::onDestroy() {
-    onStop();
-
     session_.reset();
     cleanupLuaRef();
 
