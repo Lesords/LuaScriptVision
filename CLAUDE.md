@@ -25,6 +25,21 @@ make
 # Rebuild after changes
 cd build && make -j8
 
+# SG200X Device: Parallel inference + streaming (with camera)
+# Build for SG200X:
+cmake -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-sg200x.cmake -DENABLE_CVI_CAMERA=ON -B build
+make -j8 parallel_infer_stream
+#
+# Run on device:
+./build/parallel_infer_stream scripts/yolo11_tensor_detector.lua /path/to/model.cvimodel --duration 300
+#
+# Command format:
+#   parallel_infer_stream <script.lua> <model.cvimodel> [--duration <seconds>]
+#
+# Example on-device deployment:
+#   /userdata/parallel_infer_stream /userdata/scripts/yolo11_tensor_detector.lua \
+#                                    /userdata/Models/model.cvimodel --duration 300
+
 # JPEG Decode Method Selection
 # Default: Software decode (OpenCV, no VB pool dependency)
 cmake -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-sg200x.cmake -B build
@@ -69,49 +84,11 @@ cmake -DCMAKE_TOOLCHAIN_FILE=cmake/toolchain-sg200x.cmake -DUSE_VDEC_DECODE=ON -
 
 ## Architecture Overview
 
-### 🎯 Target Platform: Embedded Linux
+### Target Platform: Embedded Linux
 
-**CRITICAL**: This project is designed to run on **low-end embedded Linux systems** with limited resources.
+**CRITICAL**: This project is designed to run on **low-end embedded Linux systems** with limited resources (RISC-V/ARMv8, <256MB RAM, no GPU).
 
-**Performance requirements**:
-- CPU: RISC-V(C906)/ARMv8 or similar low-power processors (e.g., Sophgo SG2002, RK3566)
-- Memory: < 256MB RAM available
-- Storage: Limited flash/eMMC (minimize binary size)
-- No GPU acceleration available in baseline configuration
-
-**Design principles for embedded systems**:
-
-1. **Memory efficiency**:
-   - Minimize heap allocations (use stack/static when possible)
-   - Avoid unnecessary copies (prefer move semantics, zero-copy views)
-   - Consider small buffer optimization (SBO) for containers
-   - Be aware of memory fragmentation
-
-2. **CPU efficiency**:
-   - Cache-friendly data structures (prefer contiguous memory)
-   - Avoid virtual function calls in hot paths
-   - Minimize atomic operations (shared_ptr pass-by-value)
-   - Consider SIMD optimization for batch operations
-
-3. **Binary size**:
-   - Avoid template bloat (explicit instantiation when possible)
-   - Minimize header-only libraries
-   - Use compiler optimization flags carefully
-
-4. **Power consumption**:
-   - Avoid busy-waiting loops
-   - Batch operations to reduce CPU wake-ups
-   - Consider thermal throttling on sustained workloads
-
-**When implementing features**:
-- ✅ Always benchmark performance impact
-- ✅ Profile hot paths before optimization
-- ✅ Test on actual embedded hardware when possible
-- ✅ Document performance characteristics in comments
-- ❌ Do NOT sacrifice correctness for premature optimization
-- ❌ Do NOT add features that significantly increase binary size without clear benefits
-
----
+When implementing features: benchmark performance impact, profile hot paths, minimize heap allocations, avoid unnecessary copies. See `docs/ARCHITECTURE_REFERENCE.md` for full design principles.
 
 ### Hybrid C++/Lua Design
 The project implements a **dual-language architecture** where C++ handles performance-critical operations while Lua provides scripting flexibility:
@@ -122,52 +99,12 @@ The project implements a **dual-language architecture** where C++ handles perfor
 
 ### Critical Design Decisions
 
-#### 1. Lua Compiled as C++
-**Location**: `CMakeLists.txt:18-20`
-```cmake
-target_compile_options(lua PRIVATE -x c++ -O3 -Wall -DLUA_USE_POSIX)
-```
-**Why**: Ensures exception safety when C++ exceptions cross the Lua boundary. Without this, throwing exceptions from C++ through Lua causes undefined behavior.
+See `docs/ARCHITECTURE_REFERENCE.md` for detailed explanations:
 
-#### 2. DeviceBuffer Abstraction Layer
-**Location**: `src/modules/tensor/`
-
-The tensor system uses a **virtual interface pattern** to support multiple devices:
-
-```
-DeviceBuffer (interface) - 设备缓冲区抽象
-    ├── CpuMemory (CPU implementation) - CPU内存管理
-    └── [Future: NpuMemory, TpuMemory]
-
-Tensor (user-facing class)
-    └── uses shared_ptr<DeviceBuffer>
-```
-
-**Key files**:
-- `device_buffer.h`: Abstract buffer interface with virtual methods
-- `cpu_memory.h/cpp`: CPU memory management implementation
-- `tensor.h`: User-facing tensor operations with stride-based indexing
-- `tensor_*.cpp`: Modular implementation (10 files by functionality)
-
-**Naming rationale**:
-- **DeviceBuffer**: Emphasizes cross-device data buffer abstraction
-- **CpuMemory**: Focuses on CPU-side memory allocation/deallocation
-- Combines precision: buffer (interface), memory (implementation), allocation (operations)
-
-**Design tradeoff**: Virtual function overhead (~few nanoseconds per call) vs. device abstraction. Current performance bottlenecks are NOT the virtual calls but rather:
-- Memory allocation (`CpuMemory::allocate` with memset)
-- Non-contiguous tensor copying (`contiguous_copy` recursive implementation)
-
-#### 3. Zero-Copy View Operations
-**Location**: `src/modules/tensor/tensor_shape.cpp`
-
-Operations like `slice()`, `transpose()`, `squeeze()` are **zero-copy** - they share the same underlying `DeviceBuffer` but modify metadata:
-- `shape_`: Logical dimensions
-- `strides_`: Memory layout (enables non-contiguous views)
-- `offset_`: Starting position in storage
-- `contiguous_`: Flag indicating if data is contiguous in memory
-
-**Critical invariant**: When `contiguous_ == false`, must use stride-based indexing, NOT direct pointer arithmetic.
+1. **Lua Compiled as C++** (`CMakeLists.txt:18-20`): Ensures exception safety across Lua boundary
+2. **DeviceBuffer Abstraction Layer** (`src/modules/tensor/`): Virtual interface for multi-device support (CPU/NPU/TPU)
+3. **Zero-Copy View Operations** (`tensor_shape.cpp`): `slice()`, `transpose()`, `squeeze()` share underlying buffer, modify metadata only
+   - **Critical invariant**: When `contiguous_ == false`, must use stride-based indexing, NOT direct pointer arithmetic
 
 ### Module Structure
 
@@ -203,56 +140,14 @@ local outputs = session:run(input_tensor)
 
 Pure Lua/C++ utility functions:
 - NMS (Non-Maximum Suppression)
-- Box format conversion (xywh ↔ xyxy)
+- Box format conversion (xywh to xyxy)
 - Coordinate scaling
 
-### Tensor API Performance Characteristics
-
-**Location**: See `API_IMPROVEMENTS.md` and README benchmarks
-
-| Operation | Speed | Notes |
-|-----------|-------|-------|
-| `slice()`, `transpose()` | **Instant** (~μs) | Zero-copy view |
-| `contiguous()` | **Fast** (0.02-4ms) | Optimized batch memcpy |
-| `max_with_argmax()` | **Fast** (~0.6ms) | Fused operation, single pass |
-| `where_indices()` | **Fast** (~0.07ms) | C++ vector scan |
-| `extract_columns()` | **Fast** (~0.02ms) | Direct Lua table output |
-| `to_table()` | **Fast for small data** | Only use after filtering |
+### Tensor API Performance
 
 **Golden rule**: Filter data in C++ (using `where_indices`, `index_select`), THEN convert small result sets to Lua tables.
 
-### Performance Analysis (YOLO11n, 640x640)
-
-**Time distribution**:
-| Stage | Time | Percentage |
-|-------|------|------------|
-| ONNX inference | ~100ms | **50%** |
-| Model loading | ~80ms | One-time |
-| Image load + preprocess | ~15ms | 7.5% |
-| **Postprocess (Tensor API)** | **~4.5ms** | **2.2%** |
-
-**Postprocess breakdown**:
-```
-contiguous scores [80,8400]:  3.77 ms  (672K elements copy)
-max_with_argmax:              0.57 ms
-where_indices:                0.07 ms
-extract_columns:              0.02 ms
-other:                        0.14 ms
-```
-
-**Conclusion**: Tensor API postprocess is highly efficient (~4.5ms). The bottleneck is ONNX inference (~100ms), which is determined by model complexity.
-
-### Optimizations Implemented
-
-1. **OPT-1**: Removed memset in allocate
-2. **OPT-2**: Inlined hot-path functions (at, data, raw_data, device)
-3. **OPT-3**: extract_columns returns direct Lua table (row format)
-4. **OPT-4**: Cached device type to avoid virtual calls
-5. **OPT-5**: Added in-place operations (add_, sub_, mul_, div_)
-6. **OPT-6**: Optimized contiguous_copy with batch memcpy
-7. **OPT-7**: Added `max_with_argmax()` fused operation (architecture-level)
-
-**Result**: 210ms → 200ms (~5% improvement)
+See `docs/ARCHITECTURE_REFERENCE.md` for full performance benchmarks and optimization history.
 
 ## Development Guidelines
 
@@ -311,6 +206,30 @@ other:                        0.14 ms
 - Keeps repository clean from redundant documentation
 - User will request documentation if needed
 - Conversation history already contains complete work record
+
+---
+
+### ⚠️ Critical Deployment Requirements
+
+- **MUST** use base64 pipeline + MD5 verification for binary transfer
+- **NEVER** use `/remote-device deploy`, `cat`, or `scp` — they strip null bytes from ELF binaries
+- See `docs/DEVICE_OPERATIONS.md` for the `deploy_and_verify()` function and full deployment instructions
+
+### 🔄 Device Testing Workflow
+
+After ANY code change affecting runtime behavior, follow this order:
+
+1. Build → Stop processes → Deploy (base64+MD5) → Verify with `parallel_infer_stream` → Test `node_server` → Clean up
+2. Testing order: `parallel_infer_stream` → `node_server` → Node-RED (from simple to complex)
+
+See `docs/DEVICE_OPERATIONS.md` for the full 11-step workflow with commands.
+
+### ⚠️ Node-RED Rules
+
+- **NEVER** `killall -9 node-red` or `systemctl restart node-red-service`
+- **DO** use `/flows/state` API: `curl -H 'Content-Type: application/json' http://localhost:1880/flows/state -d '{"state": "stop"}'`
+- Working directory: `/home/recamera/.node-red/`
+- See `docs/DEVICE_OPERATIONS.md` for full commands and debugging reference
 
 ---
 
@@ -441,3 +360,15 @@ Models must be in `models/` directory. The system supports:
 - Multi-output models (returns Lua table of tensors)
 
 Session creation is expensive (~100-200ms), so scripts should reuse sessions for video/batch processing.
+
+## Device Testing and Debugging
+
+### Memory Issues
+
+After multiple test runs, the device may hit `ion ioctl fail:: Out of memory`. Fix: `/rd cmd "reboot"`. Before testing: `/rd cmd "killall -9 node_server parallel_stream 2>/dev/null"`.
+
+### Known Issues
+
+All known issues (VPSS MEM input, sensor linking, binary corruption, camera node NULL) are documented in `docs/DEVICE_OPERATIONS.md` with symptoms, root causes, and workarounds.
+
+
