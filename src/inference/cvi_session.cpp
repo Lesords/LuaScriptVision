@@ -325,8 +325,21 @@ bool is_aligned_64(uint64_t addr) {
 }
 } // namespace
 
-CviSession::CviSession(const std::string& model_path) {
+CviSession::CviSession(const std::string& model_path)
+    : owns_rt_handle_(true) {
     check_cvi_rc(CVI_RT_Init(&rt_handle_), "CVI_RT_Init");
+    init_model(model_path);
+}
+
+CviSession::CviSession(const std::string& model_path, CVI_RT_HANDLE shared_rt_handle)
+    : rt_handle_(shared_rt_handle), owns_rt_handle_(false) {
+    if (!rt_handle_) {
+        throw std::runtime_error("CviSession: shared RT handle is null");
+    }
+    init_model(model_path);
+}
+
+void CviSession::init_model(const std::string& model_path) {
     check_cvi_rc(CVI_NN_RegisterModel(model_path.c_str(), &model_), "CVI_NN_RegisterModel");
     check_cvi_rc(CVI_NN_GetInputOutputTensors(model_, &input_tensors_, &input_num_,
                                              &output_tensors_, &output_num_),
@@ -390,7 +403,7 @@ CviSession::~CviSession() {
     }
     output_buffers_.clear();
     input_buffers_.clear();
-    if (rt_handle_) {
+    if (owns_rt_handle_ && rt_handle_) {
         CVI_RT_DeInit(rt_handle_);
         rt_handle_ = nullptr;
     }

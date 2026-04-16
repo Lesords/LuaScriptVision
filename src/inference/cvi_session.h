@@ -49,7 +49,10 @@ public:
         std::array<float, 3> scale{};
     };
 
+    // model_path only: self-managed RT handle (standalone/test use)
     explicit CviSession(const std::string& model_path);
+    // Shared RT handle: used by SessionManager (no CVI_RT_Init/DeInit)
+    CviSession(const std::string& model_path, CVI_RT_HANDLE shared_rt_handle);
     ~CviSession() override;
 
     std::pair<std::vector<float>, std::vector<int64_t>>
@@ -106,6 +109,7 @@ public:
 
 private:
     int32_t select_primary_output_index() const;
+    void init_model(const std::string& model_path);
     void init_device_buffers();
     void prepare_input(const float* input_data,
                        const std::vector<int64_t>& input_shape,
@@ -119,6 +123,7 @@ private:
                                   std::vector<std::vector<int64_t>>* output_shapes) const;
 
     CVI_RT_HANDLE rt_handle_ = nullptr;
+    bool owns_rt_handle_ = false;  // true only for standalone constructor
     CVI_MODEL_HANDLE model_ = nullptr;
     CVI_TENSOR* input_tensors_ = nullptr;
     CVI_TENSOR* output_tensors_ = nullptr;

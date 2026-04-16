@@ -6,6 +6,7 @@
 
 #ifdef USE_CVI_TPU
 #include "inference/cvi_session.h"
+#include "inference/tpu_scheduler.h"
 #endif
 
 #ifdef USE_CVI_MPI
@@ -154,7 +155,17 @@ FullFrameExecutionResult execute_full_frame_inference(const lua_cv::Frame& frame
         auto t_pre_end = std::chrono::steady_clock::now();
         result.timings.preprocess_ms = elapsed_ms(t_pre_start, t_pre_end);
         auto t_infer_start = std::chrono::steady_clock::now();
+#ifdef USE_CVI_TPU
+        auto tpu_result = inference::TpuScheduler::instance().submit_vb(
+            config.session, vb_mem->physical_addr(), vb_mem->size_bytes());
+        if (!tpu_result.success) {
+            throw std::runtime_error("TPU inference failed: " + tpu_result.error);
+        }
+        result.outputs = std::move(tpu_result.outputs);
+        result.output_shapes = std::move(tpu_result.output_shapes);
+#else
         config.session->run_vb(vb_mem, &result.outputs, &result.output_shapes);
+#endif
         auto t_infer_end = std::chrono::steady_clock::now();
         result.timings.infer_ms = elapsed_ms(t_infer_start, t_infer_end);
         copy_run_stats(config.session->last_run_stats(),
@@ -228,11 +239,21 @@ FullFrameExecutionResult execute_full_frame_inference(const lua_cv::Frame& frame
         auto t_pre_end = std::chrono::steady_clock::now();
         result.timings.preprocess_ms = elapsed_ms(t_pre_start, t_pre_end);
         auto t_infer_start = std::chrono::steady_clock::now();
+#ifdef USE_CVI_TPU
+        auto tpu_result = inference::TpuScheduler::instance().submit_float(
+            config.session, input_data.data(), input_data.size(), input_shape);
+        if (!tpu_result.success) {
+            throw std::runtime_error("TPU inference failed: " + tpu_result.error);
+        }
+        result.outputs = std::move(tpu_result.outputs);
+        result.output_shapes = std::move(tpu_result.output_shapes);
+#else
         config.session->run_all(
             input_data.data(),
             input_shape,
             &result.outputs,
             &result.output_shapes);
+#endif
         auto t_infer_end = std::chrono::steady_clock::now();
         result.timings.infer_ms = elapsed_ms(t_infer_start, t_infer_end);
         copy_run_stats(config.session->last_run_stats(),
@@ -348,7 +369,17 @@ RoiExecutionResult execute_roi_inference(const lua_cv::Frame& frame,
         auto t_pre_end = std::chrono::steady_clock::now();
         result.preprocess_ms = elapsed_ms(t_pre_start, t_pre_end);
         auto t_infer_start = std::chrono::steady_clock::now();
+#ifdef USE_CVI_TPU
+        auto tpu_result = inference::TpuScheduler::instance().submit_vb(
+            config.session, vb_mem->physical_addr(), vb_mem->size_bytes());
+        if (!tpu_result.success) {
+            throw std::runtime_error("TPU inference failed: " + tpu_result.error);
+        }
+        result.outputs = std::move(tpu_result.outputs);
+        result.output_shapes = std::move(tpu_result.output_shapes);
+#else
         config.session->run_vb(vb_mem, &result.outputs, &result.output_shapes);
+#endif
         auto t_infer_end = std::chrono::steady_clock::now();
         result.infer_ms = elapsed_ms(t_infer_start, t_infer_end);
         copy_run_stats(config.session->last_run_stats(),
@@ -419,11 +450,21 @@ RoiExecutionResult execute_roi_inference(const lua_cv::Frame& frame,
         auto t_pre_end = std::chrono::steady_clock::now();
         result.preprocess_ms = elapsed_ms(t_pre_start, t_pre_end);
         auto t_infer_start = std::chrono::steady_clock::now();
+#ifdef USE_CVI_TPU
+        auto tpu_result = inference::TpuScheduler::instance().submit_float(
+            config.session, input_data.data(), input_data.size(), input_shape);
+        if (!tpu_result.success) {
+            throw std::runtime_error("TPU inference failed: " + tpu_result.error);
+        }
+        result.outputs = std::move(tpu_result.outputs);
+        result.output_shapes = std::move(tpu_result.output_shapes);
+#else
         config.session->run_all(
             input_data.data(),
             input_shape,
             &result.outputs,
             &result.output_shapes);
+#endif
         auto t_infer_end = std::chrono::steady_clock::now();
         result.infer_ms = elapsed_ms(t_infer_start, t_infer_end);
         copy_run_stats(config.session->last_run_stats(),

@@ -121,8 +121,8 @@ private:
     PreprocessConfig preprocess_config_;
     bool preprocess_config_explicit_ = false;
 
-    // TPU Session
-    std::unique_ptr<inference::CviSession> session_;
+    // TPU Session (shared via SessionManager)
+    std::shared_ptr<inference::CviSession> session_;
 
     // Inference thread
     std::thread infer_thread_;

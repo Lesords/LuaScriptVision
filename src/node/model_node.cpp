@@ -15,6 +15,8 @@
 #include "stream/websocket_transport.h"
 #include "stream/model_preview_formatter.h"
 #include "inference/layout.h"
+#include "inference/session_manager.h"
+#include "inference/tpu_scheduler.h"
 #include "modules/cv/mmf_context.h"
 
 #include <cstdlib>
@@ -154,12 +156,14 @@ void ModelNode::parsePreviewConfig(const nlohmann::json& config) {
 int ModelNode::initializeSession() {
 #ifdef USE_CVI_TPU
     try {
-        // Release any existing session BEFORE loading new model.
-        // unique_ptr assignment would otherwise keep old session alive during
-        // new session construction — both model copies in ION simultaneously
-        // can exceed the 60MB carveout (38MB VB pools + 2×7.73MB = ~54MB peak).
-        session_.reset();
-        session_ = std::make_unique<inference::CviSession>(config_.model_path);
+        // Release any existing session reference first
+        if (session_) {
+            inference::SessionManager::instance().release(config_.model_path);
+            session_.reset();
+        }
+
+        // Acquire session through SessionManager (shared RT handle, ref-counted)
+        session_ = inference::SessionManager::instance().acquire(config_.model_path);
 
         if (preprocess_config_ref_.isTable()) {
             auto model_shape = session_->get_input_shape(0);
@@ -416,7 +420,14 @@ int ModelNode::onStop() {
 }
 
 int ModelNode::onDestroy() {
+#ifdef USE_CVI_TPU
+    if (session_) {
+        inference::SessionManager::instance().release(config_.model_path);
+        session_.reset();
+    }
+#else
     session_.reset();
+#endif
     cleanupLuaRef();
 
     return MA_OK;
