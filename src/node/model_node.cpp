@@ -319,7 +319,7 @@ int ModelNode::onStart() {
     }
 
     ResourceEstimator::instance().on_node_started(
-        id_, usage, camera_id, upstream_model_id);
+        id_, usage, camera_id, upstream_model_id, config_.model_path);
 
     if (!upstream_camera_) {
         bindUpstreamCamera();

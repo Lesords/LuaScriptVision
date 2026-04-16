@@ -148,10 +148,11 @@ EstimateResult ResourceEstimator::evaluate_model(
 void ResourceEstimator::on_node_started(const std::string& node_id,
                                          const ResourceRequirement& usage,
                                          const std::string& camera_id,
-                                         const std::string& upstream_model_id) {
+                                         const std::string& upstream_model_id,
+                                         const std::string& model_path) {
     std::lock_guard<std::mutex> lock(mutex_);
     active_nodes_[node_id] = usage;
-    model_topologies_[node_id] = {camera_id, upstream_model_id};
+    model_topologies_[node_id] = {camera_id, upstream_model_id, model_path};
 }
 
 void ResourceEstimator::on_node_stopped(const std::string& node_id) {
@@ -279,13 +280,13 @@ ResourceRequirement ResourceEstimator::get_available_locked() const {
 }
 
 int ResourceEstimator::count_parallel_models(const std::string& camera_id) const {
-    int count = 0;
+    std::set<std::string> parallel_models;
     for (const auto& [id, topo] : model_topologies_) {
         if (topo.upstream_model_id.empty() && topo.camera_id == camera_id) {
-            count++;
+            parallel_models.insert(topo.model_path);
         }
     }
-    return count;
+    return parallel_models.size();
 }
 
 int ResourceEstimator::count_serial_chain(const std::string& upstream_model_id) const {

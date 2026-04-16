@@ -21,6 +21,7 @@ struct ResourceRequirement {
 struct ModelTopology {
     std::string camera_id;            // Upstream camera id (empty if unknown)
     std::string upstream_model_id;    // Direct upstream model id (empty if none)
+    std::string model_path;           // For memory estimation and session sharing
 };
 
 struct CameraPolicy {
@@ -51,7 +52,8 @@ public:
     void on_node_started(const std::string& node_id,
                          const ResourceRequirement& usage,
                          const std::string& camera_id = std::string(),
-                         const std::string& upstream_model_id = std::string());
+                         const std::string& upstream_model_id = std::string(),
+                         const std::string& model_path = std::string());
     void on_node_stopped(const std::string& node_id);
 
     void register_camera(const std::string& node_id,
