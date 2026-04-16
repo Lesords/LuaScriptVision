@@ -7,6 +7,19 @@
 #include <cviruntime.h>
 #endif
 
+// Weak symbols for SessionManager integration.
+// When session_manager.cpp is linked (node_server, parallel_infer_stream), strong versions take over.
+// When not linked (test targets), these safe defaults are used.
+#ifdef USE_CVI_TPU
+bool __attribute__((weak)) session_manager_is_loaded(const std::string& path) {
+    (void)path;
+    return false;
+}
+size_t __attribute__((weak)) session_manager_total_memory() {
+    return 0;
+}
+#endif
+
 namespace node {
 
 ResourceEstimator& ResourceEstimator::instance() {
@@ -52,15 +65,57 @@ EstimateResult ResourceEstimator::evaluate_model(
     int serial_chain_len = is_serial ? count_serial_chain(upstream_model_id) : 0;
     int new_serial_count = is_serial ? (serial_chain_len + 1) : new_model_count;
 
-    // Calculate VB requirement
-    if (is_parallel && new_parallel_count >= MAX_PARALLEL_MODELS &&
-        !camera_requires_skip(camera_id)) {
-        result.pass = false;
-        result.error_code = MA_EINVAL;
-        result.reason = "Parallel mode with " +
-                       std::to_string(new_parallel_count) +
-                       " models requires camera infer_fps_limit";
-        return result;
+    // Query model memory if path provided
+    bool model_already_loaded = false;
+    if (config.contains("model")) {
+        std::string model_path = config["model"];
+#ifdef USE_CVI_TPU
+        model_already_loaded = session_manager_is_loaded(model_path);
+#endif
+        if (model_already_loaded) {
+            // Session already loaded by another node — no additional memory cost
+            result.required.model_memory = 0;
+        } else {
+            result.required.model_memory = query_model_memory(model_path);
+            if (result.required.model_memory == 0) {
+                result.required.model_memory = estimate_model_memory_from_file(model_path);
+            }
+        }
+    }
+
+    // Check ION memory constraint (actual TPU memory, not just model count)
+    if (!model_already_loaded && result.required.model_memory > 0) {
+#ifdef USE_CVI_TPU
+        size_t current_tpu_mem = session_manager_total_memory();
+        size_t total_after = current_tpu_mem + result.required.model_memory;
+        size_t available_bytes = ION_AVAILABLE_MB * 1024 * 1024;
+        if (total_after > available_bytes) {
+            result.pass = false;
+            result.error_code = MA_ENOMEM;
+            result.reason = "ION memory insufficient: need " +
+                           std::to_string(total_after / 1024 / 1024) + "MB total" +
+                           " (current: " + std::to_string(current_tpu_mem / 1024 / 1024) +
+                           "MB + new: " + std::to_string(result.required.model_memory / 1024 / 1024) +
+                           "MB), available " + std::to_string(ION_AVAILABLE_MB) + "MB";
+            return result;
+        }
+#endif
+    }
+
+    // VB pool constraint — each concurrent inference needs its own input frame buffer
+    // This is about frame buffers, not model weights, so it applies regardless of session sharing
+    // However, if the model session is already loaded (shared via SessionManager), the
+    // memory impact is negligible, so we skip the hard parallel count limit.
+    if (!model_already_loaded) {
+        if (is_parallel && new_parallel_count >= MAX_PARALLEL_MODELS &&
+            !camera_requires_skip(camera_id)) {
+            result.pass = false;
+            result.error_code = MA_EINVAL;
+            result.reason = "Parallel mode with " +
+                           std::to_string(new_parallel_count) +
+                           " models requires camera infer_fps_limit";
+            return result;
+        }
     }
 
     int vb_model_count = is_parallel ? new_parallel_count : new_serial_count;
@@ -71,46 +126,18 @@ EstimateResult ResourceEstimator::evaluate_model(
         result.required.vb_infer_blocks = 1 + new_parallel_count;
     }
 
-    // Query model memory if path provided
-    if (config.contains("model")) {
-        std::string model_path = config["model"];
-        // Try CVI Runtime SDK first, fall back to file size estimation
-        result.required.model_memory = query_model_memory(model_path);
-        if (result.required.model_memory == 0) {
-            result.required.model_memory = estimate_model_memory_from_file(model_path);
-        }
-    }
-
-    // Check VB constraint
     if (result.required.vb_infer_blocks > VB_POOL4_TOTAL) {
-        result.pass = false;
-        result.error_code = MA_ENOMEM;
-        result.reason = "VB Pool insufficient: need " +
-                       std::to_string(result.required.vb_infer_blocks) +
-                       " blocks, available " + std::to_string(VB_POOL4_TOTAL);
-
-        if (is_parallel && new_parallel_count > MAX_PARALLEL_MODELS) {
-            result.reason += ". Parallel mode limited to " +
-                            std::to_string(MAX_PARALLEL_MODELS) + " models.";
+        // Allow overflow for shared sessions: if the model is already loaded,
+        // the extra VB blocks are for frame buffers only, which can be managed
+        // by the TPU scheduler's serialization.
+        if (!model_already_loaded) {
+            result.pass = false;
+            result.error_code = MA_ENOMEM;
+            result.reason = "VB Pool insufficient: need " +
+                           std::to_string(result.required.vb_infer_blocks) +
+                           " blocks, available " + std::to_string(VB_POOL4_TOTAL);
+            return result;
         }
-        return result;
-    }
-
-    // Check model count limits
-    if (is_parallel && new_parallel_count > MAX_PARALLEL_MODELS) {
-        result.pass = false;
-        result.error_code = MA_ENOMEM;
-        result.reason = "Parallel mode supports max " +
-                       std::to_string(MAX_PARALLEL_MODELS) + " models";
-        return result;
-    }
-
-    if (!is_parallel && new_serial_count > MAX_SERIAL_MODELS) {
-        result.pass = false;
-        result.error_code = MA_ENOMEM;
-        result.reason = "Serial mode supports max " +
-                       std::to_string(MAX_SERIAL_MODELS) + " models";
-        return result;
     }
 
     result.pass = true;

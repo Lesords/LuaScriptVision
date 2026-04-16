@@ -26,6 +26,9 @@ public:
     // Release a session. Reference count -1. Unloads when count reaches 0.
     void release(const std::string& model_path);
 
+    // Check if a model is already loaded (no memory cost to acquire again)
+    bool is_loaded(const std::string& model_path) const;
+
     size_t total_tpu_memory() const;
     int loaded_model_count() const;
 
