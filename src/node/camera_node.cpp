@@ -22,6 +22,7 @@ CameraNode::CameraNode(const std::string& id, const std::string& type)
     : DataNode(id, type, 4) {}
 
 CameraNode::~CameraNode() {
+    clearInferFrameCache();
     onDestroy();
 }
 
@@ -192,6 +193,7 @@ int CameraNode::onStop() {
 #endif
 
     stopCapture();
+    clearInferFrameCache();
 
 #ifdef USE_CVI_CAMERA
     if (camera_) {
@@ -451,9 +453,13 @@ void CameraNode::captureLoop() {
         // === INFER Channel: capture and process (pure infer, no stream coupling) ===
         lua_cv::Frame infer_frame;
         if (captureInferFrame(infer_frame)) {
+            cacheInferFrame(infer_frame);
             processInferFrame(infer_frame);
         } else {
-            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            bool reused = reuseCachedInferFrame();
+            if (!reused) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
         }
 #else
         // Simulation mode without CVI Camera
@@ -473,6 +479,8 @@ void CameraNode::captureLoop() {
 // INFER Channel: Capture
 // ========================================
 bool CameraNode::captureInferFrame(lua_cv::Frame& frame) {
+    // 返回true表示采集到新帧，false表示采集失败
+
 #ifdef USE_CVI_CAMERA
     bool log_error = (skip_state_.camera_nobuf_streak == 0);
     if (!camera_ || !camera_->read(frame, 100, log_error)) {
@@ -560,6 +568,69 @@ bool CameraNode::processInferFrame(lua_cv::Frame& infer_frame) {
 
     frame_count_.fetch_add(1, std::memory_order_relaxed);
     return true;
+}
+
+void CameraNode::cacheInferFrame(const lua_cv::Frame& infer_frame) {
+    lua_cv::Frame detached = infer_frame.clone();
+    if (detached.empty()) {
+        std::cerr << "[CameraNode] WARN: skipping empty INFER frame cache entry" << std::endl;
+        return;
+    }
+
+    dropInvalidInferCacheFrames();
+
+    auto* new_sf = new SharedFrame(std::move(detached));
+    infer_frame_cache_.push_back(new_sf);
+    if (infer_frame_cache_.size() > kInferFrameCacheSize) {
+        auto* old_sf = infer_frame_cache_.front();
+        if (old_sf) {
+            old_sf->release();
+        }
+        infer_frame_cache_.pop_front();
+    }
+}
+
+bool CameraNode::reuseCachedInferFrame() {
+    dropInvalidInferCacheFrames();
+
+    for (auto it = infer_frame_cache_.rbegin(); it != infer_frame_cache_.rend(); ++it) {
+        SharedFrame* cached_sf = *it;
+        if (!cached_sf || cached_sf->frame().empty()) {
+            continue;
+        }
+
+        lua_cv::Frame cached_copy = cached_sf->frame().clone();
+        if (cached_copy.empty()) {
+            continue;
+        }
+
+        return processInferFrame(cached_copy);
+    }
+
+    return false;
+}
+
+void CameraNode::dropInvalidInferCacheFrames() {
+    for (auto it = infer_frame_cache_.begin(); it != infer_frame_cache_.end();) {
+        SharedFrame* cached_sf = *it;
+        if (!cached_sf || cached_sf->frame().empty()) {
+            if (cached_sf) {
+                cached_sf->release();
+            }
+            it = infer_frame_cache_.erase(it);
+            continue;
+        }
+        ++it;
+    }
+}
+
+void CameraNode::clearInferFrameCache() {
+    for (auto* sf : infer_frame_cache_) {
+        if (sf) {
+            sf->release();
+        }
+    }
+    infer_frame_cache_.clear();
 }
 
 // ========================================

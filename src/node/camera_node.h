@@ -7,6 +7,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <deque>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -31,6 +32,11 @@ enum class FrameChannel {
 };
 
 class CameraNode : public DataNode {
+private:
+    static constexpr size_t kInferFrameCacheSize = 5;
+    std::deque<SharedFrame*> infer_frame_cache_;
+    // Cache detached CPU clones so fallback never retains VPSS/VB-backed frames.
+
 public:
     CameraNode(const std::string& id, const std::string& type);
     ~CameraNode() override;
@@ -190,6 +196,10 @@ private:
     // INFER channel: capture and process
     bool captureInferFrame(lua_cv::Frame& frame);
     bool processInferFrame(lua_cv::Frame& infer_frame);
+    void cacheInferFrame(const lua_cv::Frame& infer_frame);
+    bool reuseCachedInferFrame();
+    void dropInvalidInferCacheFrames();
+    void clearInferFrameCache();
 
     // STREAM channel: capture and process
     bool captureStreamFrame(lua_cv::Frame& frame);
