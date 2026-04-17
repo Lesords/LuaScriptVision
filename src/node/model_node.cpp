@@ -45,6 +45,23 @@ ModelNode::~ModelNode() {
 }
 
 int ModelNode::parseConfig(const nlohmann::json& config) {
+    // Enforce classes param: must exist, be array, and non-empty
+    if (config.contains("labels") && config["labels"].is_array() && !config["labels"].empty()) {
+        config_.classes.clear();
+        for (const auto& c : config["labels"]) {
+            if (!c.is_string()) {
+                last_error_ = "Each class in 'classes' must be a string";
+                std::cerr << "[ModelNode] Invalid class type in classes param" << std::endl;
+                return MA_EINVAL;
+            }
+            config_.classes.push_back(c.get<std::string>());
+        }
+        std::cout << "[ModelNode] classes param: " << config["labels"].dump() << std::endl;
+    } else {
+        last_error_ = "'classes' param missing, not array, or empty";
+        std::cerr << "[ModelNode] classes param: (invalid or not provided)" << std::endl;
+        return MA_EINVAL;
+    }
     if (config.contains("model")) {
         config_.model_path = config.at("model");
     } else if (config.contains("uri")) {
@@ -776,8 +793,10 @@ nlohmann::json ModelNode::callPostprocess(
     }
 #endif
 
-    LuaModelPostprocessResult result = call_lua_model_postprocess(
-        L_, postprocess_, output_names, std::move(outputs), std::move(output_shapes), meta);
+    nlohmann::json meta_with_classes = meta;
+meta_with_classes["classes"] = config_.classes;
+LuaModelPostprocessResult result = call_lua_model_postprocess(
+        L_, postprocess_, output_names, std::move(outputs), std::move(output_shapes), meta_with_classes);
     if (result.has_warning) {
         event("warning", 0, result.warning_payload);
     }

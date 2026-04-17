@@ -241,7 +241,16 @@ function Model.postprocess(outputs, meta)
         box.h = preprocess_lib.scale_size_h(box.h, meta)
         preprocess_lib.clamp_box(box, meta)
     end
-
+    -- 过滤：只保留 classes 中的类别
+    if meta.classes and #meta.classes > 0 then
+        local allowed = {}
+        for _, cname in ipairs(meta.classes) do allowed[cname] = true end
+        local filtered = {}
+        for _, box in ipairs(proposals) do
+            if allowed[box.label] then table.insert(filtered, box) end
+        end
+        proposals = filtered
+    end
     -- Apply NMS
     local final_boxes = utils.nms(proposals, Model.config.iou_thres)
 

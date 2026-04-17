@@ -92,6 +92,7 @@ private:
         bool crop_size_explicit = false;
         float conf_threshold = 0.25f;
         int infer_timeout_ms = 5000;
+        std::vector<std::string> classes; // Enforced classes list
 
         // Lua integration
         bool profile = false;
