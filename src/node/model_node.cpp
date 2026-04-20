@@ -650,6 +650,10 @@ nlohmann::json ModelNode::runFullFrameInference(const lua_cv::Frame& frame,
         }
     }
 
+    if (execution.skipped) {
+        return {{"items", nlohmann::json::array()}};
+    }
+
     int meta_frame_w = frame.width();
     int meta_frame_h = frame.height();
     if (upstream_camera_) {

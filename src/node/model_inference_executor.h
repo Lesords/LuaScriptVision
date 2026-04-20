@@ -37,6 +37,7 @@ struct FullFrameExecutionResult {
     PreprocessMeta preprocess_meta;
     InferenceTimings timings;
     std::optional<ExecutionWarning> warning;
+    bool skipped = false;
 };
 
 struct RoiExecutionResult {

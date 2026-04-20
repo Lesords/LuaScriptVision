@@ -1,6 +1,6 @@
 #include "model_inference_executor.h"
-
 #include "model_node_utils.h"
+#include "resource_limits.h"
 
 #include "modules/cv/frame.h"
 
@@ -17,11 +17,51 @@
 
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
+#include <mutex>
 #include <opencv2/opencv.hpp>
 #include <stdexcept>
 
 namespace node {
 namespace {
+
+// Limits concurrent VPSS preprocess + TPU inference to match VB pool capacity.
+// Pool 3 has VB_POOL3_TOTAL blocks; exceeding this causes NOBUF (0xc006800e).
+class VpssSlotSemaphore {
+public:
+    explicit VpssSlotSemaphore(int max_count) : count_(max_count) {}
+
+    void acquire() {
+        std::unique_lock<std::mutex> lock(mutex_);
+        cv_.wait(lock, [this] { return count_ > 0; });
+        --count_;
+    }
+
+    void release() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++count_;
+        cv_.notify_one();
+    }
+
+private:
+    int count_;
+    std::mutex mutex_;
+    std::condition_variable cv_;
+};
+
+// RAII guard for VpssSlotSemaphore
+struct VpssSlotGuard {
+    VpssSlotSemaphore& sem;
+    explicit VpssSlotGuard(VpssSlotSemaphore& s) : sem(s) { sem.acquire(); }
+    ~VpssSlotGuard() { sem.release(); }
+    VpssSlotGuard(const VpssSlotGuard&) = delete;
+    VpssSlotGuard& operator=(const VpssSlotGuard&) = delete;
+};
+
+VpssSlotSemaphore& vpss_slot_semaphore() {
+    static VpssSlotSemaphore sem(VB_POOL3_TOTAL);
+    return sem;
+}
 
 void fill_resize_meta(int source_w,
                       int source_h,
@@ -78,6 +118,10 @@ FullFrameExecutionResult execute_full_frame_inference(const lua_cv::Frame& frame
     std::string preprocess_type = to_lower(preprocess.type);
 
 #ifdef USE_CVI_MPI
+    // Limit concurrent VPSS preprocess to available VB pool blocks.
+    // Without this, 3 ModelNodes can exhaust Pool 3 (2 blocks) causing NOBUF.
+    VpssSlotGuard vpss_guard(vpss_slot_semaphore());
+
     if (config.session->supports_vb_input() &&
         frame.storage_type() == lua_cv::Frame::StorageType::CVI) {
         auto spec = config.session->get_vb_input_spec();
@@ -152,12 +196,16 @@ FullFrameExecutionResult execute_full_frame_inference(const lua_cv::Frame& frame
         if (!vb_mem) {
             throw std::runtime_error("Failed to get VB memory from frame");
         }
+
         auto t_pre_end = std::chrono::steady_clock::now();
         result.timings.preprocess_ms = elapsed_ms(t_pre_start, t_pre_end);
         auto t_infer_start = std::chrono::steady_clock::now();
 #ifdef USE_CVI_TPU
         auto tpu_result = inference::TpuScheduler::instance().submit_vb(
             config.session, vb_mem->physical_addr(), vb_mem->size_bytes());
+        // Release VPSS output frame immediately after TPU inference completes.
+        // Returns VB block to pool before function scope ends.
+        preprocessed = lua_cv::Frame();
         if (!tpu_result.success) {
             throw std::runtime_error("TPU inference failed: " + tpu_result.error);
         }
@@ -165,6 +213,7 @@ FullFrameExecutionResult execute_full_frame_inference(const lua_cv::Frame& frame
         result.output_shapes = std::move(tpu_result.output_shapes);
 #else
         config.session->run_vb(vb_mem, &result.outputs, &result.output_shapes);
+        preprocessed = lua_cv::Frame();
 #endif
         auto t_infer_end = std::chrono::steady_clock::now();
         result.timings.infer_ms = elapsed_ms(t_infer_start, t_infer_end);
@@ -174,6 +223,11 @@ FullFrameExecutionResult execute_full_frame_inference(const lua_cv::Frame& frame
                        &result.timings.tpu_output_ms);
         result.timings.use_vb = true;
 #endif
+    } else if (config.session->supports_vb_input()) {
+        // INT8 VB-input model but frame is not in CVI storage (e.g. cached CPU clone).
+        // Cannot use CPU float fallback - the quantized model expects VB input.
+        // Skip this frame rather than crashing in run_all().
+        result.skipped = true;
     } else {
         cv::Mat mat;
         bool skip_preprocess = false;
@@ -298,6 +352,9 @@ RoiExecutionResult execute_roi_inference(const lua_cv::Frame& frame,
     std::string preprocess_type = to_lower(preprocess.type);
 
 #ifdef USE_CVI_MPI
+    // Limit concurrent VPSS preprocess to available VB pool blocks.
+    VpssSlotGuard vpss_guard(vpss_slot_semaphore());
+
     if (config.session->supports_vb_input() &&
         frame.storage_type() == lua_cv::Frame::StorageType::CVI) {
         auto spec = config.session->get_vb_input_spec();
