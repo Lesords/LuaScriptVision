@@ -106,6 +106,12 @@ function Model.postprocess(outputs, meta)
         error("No output tensor found")
     end
     
+    local shape = output_tensor:shape()
+    -- Model output is [1, N, 1, 1], reshape to [1, N] for topk
+    if #shape == 4 and shape[3] == 1 and shape[4] == 1 then
+        output_tensor = output_tensor:reshape({shape[1], shape[2]})
+    end
+
     local topk_results = output_tensor:topk(Model.config.topk)
     
     -- Map indices to labels
