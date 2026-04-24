@@ -150,6 +150,25 @@ FullFrameExecutionResult execute_full_frame_inference(const lua_cv::Frame& frame
                 vpss.letterbox(work, target_w, target_h,
                                static_cast<uint8_t>(preprocess.fill_value),
                                nullptr, out_pf);
+            } else if (preprocess_type == "resize_center_crop") {
+                float r = std::max(static_cast<float>(target_w) / frame.width(),
+                                   static_cast<float>(target_h) / frame.height());
+                int rw = static_cast<int>(std::ceil(frame.width() * r));
+                int rh = static_cast<int>(std::ceil(frame.height() * r));
+                int cx = (rw - target_w) / 2;
+                int cy = (rh - target_h) / 2;
+                vpss.crop_resize(work, cx, cy, target_w, target_h, target_w, target_h, out_pf);
+                result.preprocess_meta.scale_x = static_cast<float>(target_w) /
+                    static_cast<float>(std::max(1, frame.width()));
+                result.preprocess_meta.scale_y = static_cast<float>(target_h) /
+                    static_cast<float>(std::max(1, frame.height()));
+                result.preprocess_meta.scale = result.preprocess_meta.scale_x;
+                result.preprocess_meta.ori_w = frame.width();
+                result.preprocess_meta.ori_h = frame.height();
+                result.preprocess_meta.input_w = target_w;
+                result.preprocess_meta.input_h = target_h;
+                result.preprocess_meta.pad_x = 0;
+                result.preprocess_meta.pad_y = 0;
             } else if (preprocess_type == "resize" || preprocess_type == "none") {
                 if (frame.width() != target_w || frame.height() != target_h ||
                     preprocess_type == "resize") {
@@ -272,6 +291,17 @@ FullFrameExecutionResult execute_full_frame_inference(const lua_cv::Frame& frame
                                cv::Scalar(preprocess.fill_value,
                                           preprocess.fill_value,
                                           preprocess.fill_value));
+        } else if (!skip_preprocess && preprocess_type == "resize_center_crop") {
+            float r = std::max(static_cast<float>(target_w) / mat.cols,
+                               static_cast<float>(target_h) / mat.rows);
+            int rw = static_cast<int>(std::ceil(mat.cols * r));
+            int rh = static_cast<int>(std::ceil(mat.rows * r));
+            cv::resize(mat, mat, cv::Size(rw, rh));
+            int cx = (rw - target_w) / 2;
+            int cy = (rh - target_h) / 2;
+            mat = mat(cv::Rect(cx, cy, target_w, target_h)).clone();
+            fill_resize_meta(frame.width(), frame.height(), target_w, target_h,
+                             &result.preprocess_meta);
         } else if (!skip_preprocess && (preprocess_type == "resize" || preprocess_type == "none")) {
             if (target_w > 0 && target_h > 0 &&
                 (mat.cols != target_w || mat.rows != target_h || preprocess_type == "resize")) {
@@ -394,6 +424,26 @@ RoiExecutionResult execute_roi_inference(const lua_cv::Frame& frame,
                     }
                 }
                 fill_resize_meta(roi.w, roi.h, target_w, target_h, &result.preprocess_meta);
+            } else if (preprocess_type == "resize_center_crop") {
+                float r = std::max(static_cast<float>(target_w) / roi.w,
+                                   static_cast<float>(target_h) / roi.h);
+                int rw = static_cast<int>(std::ceil(roi.w * r));
+                int rh = static_cast<int>(std::ceil(roi.h * r));
+                int cx = (rw - target_w) / 2;
+                int cy = (rh - target_h) / 2;
+                vpss.crop_resize(work, roi.x + cx, roi.y + cy, target_w, target_h,
+                                 target_w, target_h, out_pf);
+                result.preprocess_meta.scale_x = static_cast<float>(target_w) /
+                    static_cast<float>(std::max(1, roi.w));
+                result.preprocess_meta.scale_y = static_cast<float>(target_h) /
+                    static_cast<float>(std::max(1, roi.h));
+                result.preprocess_meta.scale = result.preprocess_meta.scale_x;
+                result.preprocess_meta.ori_w = roi.w;
+                result.preprocess_meta.ori_h = roi.h;
+                result.preprocess_meta.input_w = target_w;
+                result.preprocess_meta.input_h = target_h;
+                result.preprocess_meta.pad_x = 0;
+                result.preprocess_meta.pad_y = 0;
             } else {
                 throw std::runtime_error("Unsupported preprocess type: " + preprocess.type);
             }
@@ -487,6 +537,16 @@ RoiExecutionResult execute_roi_inference(const lua_cv::Frame& frame,
                                cv::Scalar(preprocess.fill_value,
                                           preprocess.fill_value,
                                           preprocess.fill_value));
+        } else if (!skip_preprocess && preprocess_type == "resize_center_crop") {
+            float r = std::max(static_cast<float>(target_w) / mat.cols,
+                               static_cast<float>(target_h) / mat.rows);
+            int rw = static_cast<int>(std::ceil(mat.cols * r));
+            int rh = static_cast<int>(std::ceil(mat.rows * r));
+            cv::resize(mat, mat, cv::Size(rw, rh));
+            int cx = (rw - target_w) / 2;
+            int cy = (rh - target_h) / 2;
+            mat = mat(cv::Rect(cx, cy, target_w, target_h)).clone();
+            fill_resize_meta(roi.w, roi.h, target_w, target_h, &result.preprocess_meta);
         } else if (!skip_preprocess &&
                    (preprocess_type == "resize" || preprocess_type == "none")) {
             if (mat.cols != target_w || mat.rows != target_h || preprocess_type == "resize") {
