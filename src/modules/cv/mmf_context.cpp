@@ -3,6 +3,7 @@
 #include <array>
 #include <cstring>
 #include <iostream>
+#include <sstream>
 
 namespace lua_cv {
 
@@ -589,6 +590,64 @@ void MmfContext::resolve_vpss_groups() {
     groups_resolved_ = true;
     std::cout << "[MMF] VPSS groups resolved: isp=" << resolved_isp_group_
               << " mem=" << resolved_mem_group_ << std::endl;
+}
+
+void MmfContext::acquire_mem_vpss_group(uint32_t input_width, uint32_t input_height, PixelFormat input_format) {
+    std::lock_guard<std::mutex> lock(mem_group_mutex_);
+    ++mem_group_refcount_;
+    if (mem_group_created_) {
+        return;
+    }
+
+    VPSS_GRP_ATTR_S grp_attr{};
+    grp_attr.u32MaxW = input_width;
+    grp_attr.u32MaxH = input_height;
+    grp_attr.enPixelFormat = to_cvi_pixel_format(input_format);
+    grp_attr.u8VpssDev = static_cast<CVI_U8>(vpss_dev_for_mem());
+
+    CVI_S32 rc = CVI_VPSS_CreateGrp(resolved_mem_group_, &grp_attr);
+    if (rc == CVI_ERR_VPSS_EXIST) {
+        std::cout << "[MMF] MEM VPSS group " << resolved_mem_group_
+                  << " already exists, reusing" << std::endl;
+    } else if (rc != CVI_SUCCESS) {
+        --mem_group_refcount_;
+        std::ostringstream oss;
+        oss << "MmfContext - CVI_VPSS_CreateGrp failed: 0x" << std::hex << rc;
+        throw std::runtime_error(oss.str());
+    }
+
+    rc = CVI_VPSS_ResetGrp(resolved_mem_group_);
+    if (rc != CVI_SUCCESS) {
+        CVI_VPSS_DestroyGrp(resolved_mem_group_);
+        --mem_group_refcount_;
+        std::ostringstream oss;
+        oss << "MmfContext - CVI_VPSS_ResetGrp failed: 0x" << std::hex << rc;
+        throw std::runtime_error(oss.str());
+    }
+
+    mem_group_created_ = true;
+    std::cout << "[MMF] MEM VPSS group " << resolved_mem_group_
+              << " created (refcount=" << mem_group_refcount_ << ")" << std::endl;
+}
+
+void MmfContext::release_mem_vpss_group() {
+    std::lock_guard<std::mutex> lock(mem_group_mutex_);
+    if (mem_group_refcount_ <= 0) {
+        return;
+    }
+    --mem_group_refcount_;
+    if (mem_group_refcount_ == 0 && mem_group_created_) {
+        CVI_VPSS_StopGrp(resolved_mem_group_);
+        CVI_VPSS_DestroyGrp(resolved_mem_group_);
+        mem_group_created_ = false;
+        mem_group_started_ = false;
+        mem_chn_out_width_ = 0;
+        mem_chn_out_height_ = 0;
+        mem_chn_out_format_ = PixelFormat::UNKNOWN;
+        mem_chn_letterbox_ = false;
+        mem_chn_pad_value_ = 0;
+        std::cout << "[MMF] MEM VPSS group " << resolved_mem_group_ << " destroyed" << std::endl;
+    }
 }
 #endif
 

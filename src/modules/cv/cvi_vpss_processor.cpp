@@ -487,82 +487,12 @@ void CviVpssProcessor::ensure_group(uint32_t input_width, uint32_t input_height,
         throw std::runtime_error(oss.str());
     }
 
-    if (group_created_ && input_width == max_width_ && input_height == max_height_
-        && input_format == input_format_) {
+    if (group_created_) {
         return;
     }
 
-    destroy_group();
-
-    VPSS_GRP_ATTR_S grp_attr{};
-    grp_attr.u32MaxW = input_width;
-    grp_attr.u32MaxH = input_height;
-    grp_attr.enPixelFormat = to_cvi_pixel_format(input_format);
-    if (grp_attr.enPixelFormat == PIXEL_FORMAT_MAX) {
-        throw std::runtime_error("CviVpssProcessor - unsupported input pixel format");
-    }
-    grp_attr.stFrameRate.s32SrcFrameRate = -1;
-    grp_attr.stFrameRate.s32DstFrameRate = -1;
-    int vpss_dev = MmfContext::vpss_dev_for_mem();
-    if (vpss_dev < 0) {
-        throw std::runtime_error("CviVpssProcessor - invalid VPSS dev for MEM input");
-    }
-    grp_attr.u8VpssDev = static_cast<CVI_U8>(vpss_dev);
-
-    if (grp_ < 0) {
-        grp_ = select_vpss_group_for_mem();
-        if (grp_ < 0) {
-            throw std::runtime_error("CviVpssProcessor - no available VPSS group");
-        }
-    }
-
-    CVI_S32 rc = CVI_VPSS_CreateGrp(grp_, &grp_attr);
-    bool grp_exists = (rc == CVI_ERR_VPSS_EXIST);
-    if (!grp_exists && rc != CVI_SUCCESS) {
-        log_vpss_create_context(grp_attr, input_format, grp_, rc);
-        VPSS_GRP_ATTR_S existing{};
-        CVI_S32 get_rc = CVI_VPSS_GetGrpAttr(grp_, &existing);
-        if (get_rc == CVI_SUCCESS) {
-            grp_exists = true;
-        }
-    }
-    if (grp_exists) {
-        std::cerr << "[WARN] CviVpssProcessor: VPSS group exists, reconfiguring" << std::endl;
-        CVI_S32 cleanup_rc = CVI_VPSS_DisableChn(grp_, chn_);
-        if (cleanup_rc != CVI_SUCCESS) {
-            std::cerr << "[WARN] CviVpssProcessor: CVI_VPSS_DisableChn failed: 0x"
-                      << std::hex << cleanup_rc << std::dec << std::endl;
-        }
-        cleanup_rc = CVI_VPSS_StopGrp(grp_);
-        if (cleanup_rc != CVI_SUCCESS) {
-            std::cerr << "[WARN] CviVpssProcessor: CVI_VPSS_StopGrp failed: 0x"
-                      << std::hex << cleanup_rc << std::dec << std::endl;
-        }
-        cleanup_rc = CVI_VPSS_SetGrpAttr(grp_, &grp_attr);
-        if (cleanup_rc != CVI_SUCCESS) {
-            std::ostringstream oss;
-            oss << "CviVpssProcessor - CVI_VPSS_SetGrpAttr failed: 0x" << std::hex << cleanup_rc;
-            throw std::runtime_error(oss.str());
-        }
-        rc = CVI_VPSS_ResetGrp(grp_);
-        if (rc != CVI_SUCCESS) {
-            std::ostringstream oss;
-            oss << "CviVpssProcessor - CVI_VPSS_ResetGrp failed: 0x" << std::hex << rc;
-            throw std::runtime_error(oss.str());
-        }
-    } else {
-        if (rc != CVI_SUCCESS) {
-            std::ostringstream oss;
-            oss << "CviVpssProcessor - CVI_VPSS_CreateGrp failed: 0x" << std::hex << rc;
-            throw std::runtime_error(oss.str());
-        }
-
-        rc = CVI_VPSS_ResetGrp(grp_);
-        if (rc != CVI_SUCCESS) {
-            CVI_VPSS_DestroyGrp(grp_);
-            throw std::runtime_error("CviVpssProcessor - CVI_VPSS_ResetGrp failed");
-        }
-    }
+    MmfContext::instance().acquire_mem_vpss_group(input_width, input_height, input_format);
+    grp_ = select_vpss_group_for_mem();
 
     group_created_ = true;
     group_started_ = false;
@@ -577,17 +507,54 @@ void CviVpssProcessor::ensure_channel(uint32_t out_width, uint32_t out_height, P
         throw std::runtime_error("CviVpssProcessor - VPSS group not created");
     }
 
-    bool need_reconfig = (!group_started_ || out_width_ != out_width || out_height_ != out_height ||
-                          out_format_ != out_format || letterbox_enabled_ != letterbox ||
-                          pad_value_ != pad_value);
+    auto& ctx = MmfContext::instance();
+    // Compare against the SHARED channel state (MmfContext), not per-instance state.
+    // Multiple CviVpssProcessor instances share the same VPSS group+channel, so
+    // when one processor reconfigures the channel (e.g., classify 224x224), others
+    // (detectors 640x640) must detect the mismatch and reconfigure.
+    bool need_reconfig = (!ctx.mem_vpss_group_started() ||
+                          ctx.mem_vpss_chn_out_width() != out_width ||
+                          ctx.mem_vpss_chn_out_height() != out_height ||
+                          ctx.mem_vpss_chn_out_format() != out_format ||
+                          ctx.mem_vpss_chn_letterbox() != letterbox ||
+                          ctx.mem_vpss_chn_pad_value() != pad_value);
 
     if (!need_reconfig) {
         return;
     }
 
-    if (group_started_) {
+    std::cerr << "[VPSS-RECFG] grp=" << grp_ << " chn=" << chn_
+              << " shared=" << ctx.mem_vpss_chn_out_width() << "x" << ctx.mem_vpss_chn_out_height()
+              << " -> " << out_width << "x" << out_height
+              << " grp_started=" << ctx.mem_vpss_group_started() << std::endl;
+
+    // When the group is already running, a full StopGrp → ResetGrp cycle is required
+    // to reinitialize the VPSS hardware pipeline before applying new channel attributes.
+    if (ctx.mem_vpss_group_started()) {
+        std::cerr << "[VPSS-RECFG] StopGrp+ResetGrp cycle on grp=" << grp_ << std::endl;
         CVI_VPSS_DisableChn(grp_, chn_);
+        CVI_S32 stop_rc = CVI_VPSS_StopGrp(grp_);
+        if (stop_rc != CVI_SUCCESS) {
+            std::cerr << "[VPSS-RECFG] StopGrp failed: 0x" << std::hex << stop_rc << std::dec << std::endl;
+        }
+        VPSS_GRP_ATTR_S grp_attr{};
+        grp_attr.u32MaxW = max_width_;
+        grp_attr.u32MaxH = max_height_;
+        grp_attr.enPixelFormat = to_cvi_pixel_format(input_format_);
+        grp_attr.u8VpssDev = static_cast<CVI_U8>(MmfContext::vpss_dev_for_mem());
+        CVI_S32 attr_rc = CVI_VPSS_SetGrpAttr(grp_, &grp_attr);
+        if (attr_rc != CVI_SUCCESS) {
+            std::cerr << "[VPSS-RECFG] SetGrpAttr failed: 0x" << std::hex << attr_rc << std::dec << std::endl;
+        }
+        CVI_S32 reset_rc = CVI_VPSS_ResetGrp(grp_);
+        if (reset_rc != CVI_SUCCESS) {
+            std::cerr << "[VPSS-RECFG] ResetGrp failed: 0x" << std::hex << reset_rc << std::dec << std::endl;
+        }
+        ctx.set_mem_vpss_group_started(false);
+        std::cerr << "[VPSS-RECFG] StopGrp+ResetGrp done" << std::endl;
     }
+
+    CVI_VPSS_DisableChn(grp_, chn_);
 
     VPSS_CHN_ATTR_S chn_attr{};
     chn_attr.u32Width = out_width;
@@ -620,12 +587,12 @@ void CviVpssProcessor::ensure_channel(uint32_t out_width, uint32_t out_height, P
         throw std::runtime_error("CviVpssProcessor - CVI_VPSS_EnableChn failed");
     }
 
-    if (!group_started_) {
+    if (!ctx.mem_vpss_group_started()) {
         rc = CVI_VPSS_StartGrp(grp_);
-        if (rc != CVI_SUCCESS) {
+        if (rc != CVI_SUCCESS && rc != CVI_ERR_VPSS_EXIST) {
             throw std::runtime_error("CviVpssProcessor - CVI_VPSS_StartGrp failed");
         }
-        group_started_ = true;
+        ctx.set_mem_vpss_group_started(true);
     }
 
     VB_POOL pool = select_output_pool(out_width, out_height, out_format);
@@ -644,11 +611,14 @@ void CviVpssProcessor::ensure_channel(uint32_t out_width, uint32_t out_height, P
         out_pool_ = pool;
     }
 
+    // Update both per-instance and shared state
     out_width_ = out_width;
     out_height_ = out_height;
     out_format_ = out_format;
     letterbox_enabled_ = letterbox;
     pad_value_ = pad_value;
+    ctx.set_mem_vpss_chn_state(out_width, out_height, out_format, letterbox, pad_value);
+    group_started_ = true;
 }
 
 void CviVpssProcessor::process_frame(Frame& frame, uint32_t out_width, uint32_t out_height,
@@ -713,7 +683,10 @@ void CviVpssProcessor::process_frame(Frame& frame, uint32_t out_width, uint32_t 
         }
         last_error_ = rc;
         std::ostringstream oss;
-        oss << "CviVpssProcessor - CVI_VPSS_SendFrame failed: 0x" << std::hex << rc;
+        oss << "CviVpssProcessor - CVI_VPSS_SendFrame failed: 0x" << std::hex << rc
+            << " grp=" << grp_ << " chn=" << chn_
+            << " input=" << input_frame.stVFrame.u32Width << "x" << input_frame.stVFrame.u32Height
+            << " out=" << out_width << "x" << out_height;
         throw std::runtime_error(oss.str());
     }
     VIDEO_FRAME_INFO_S output_frame{};
@@ -794,6 +767,7 @@ void CviVpssProcessor::destroy_group() {
     if (group_started_) {
         CVI_VPSS_DisableChn(grp_, chn_);
         CVI_VPSS_StopGrp(grp_);
+        MmfContext::instance().set_mem_vpss_group_started(false);
         group_started_ = false;
     }
 
@@ -802,7 +776,7 @@ void CviVpssProcessor::destroy_group() {
         out_pool_ = VB_INVALID_POOLID;
     }
 
-    CVI_VPSS_DestroyGrp(grp_);
+    MmfContext::instance().release_mem_vpss_group();
     group_created_ = false;
     grp_ = -1;
     max_width_ = 0;

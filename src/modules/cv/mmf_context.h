@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <mutex>
 #include <vector>
 
 #include "cv_types.h"
@@ -99,6 +100,26 @@ public:
 
     void dump_status(const char* tag) const;
 
+    void acquire_mem_vpss_group(uint32_t input_width, uint32_t input_height, PixelFormat input_format);
+    void release_mem_vpss_group();
+    bool mem_vpss_group_created() const { return mem_group_created_; }
+    bool mem_vpss_group_started() const { return mem_group_started_; }
+    void set_mem_vpss_group_started(bool v) { mem_group_started_ = v; }
+
+    uint32_t mem_vpss_chn_out_width() const { return mem_chn_out_width_; }
+    uint32_t mem_vpss_chn_out_height() const { return mem_chn_out_height_; }
+    PixelFormat mem_vpss_chn_out_format() const { return mem_chn_out_format_; }
+    bool mem_vpss_chn_letterbox() const { return mem_chn_letterbox_; }
+    uint8_t mem_vpss_chn_pad_value() const { return mem_chn_pad_value_; }
+    void set_mem_vpss_chn_state(uint32_t w, uint32_t h, PixelFormat fmt,
+                                bool letterbox, uint8_t pad_value) {
+        mem_chn_out_width_ = w;
+        mem_chn_out_height_ = h;
+        mem_chn_out_format_ = fmt;
+        mem_chn_letterbox_ = letterbox;
+        mem_chn_pad_value_ = pad_value;
+    }
+
 private:
     MmfContext() = default;
     void resolve_vpss_groups();
@@ -109,6 +130,16 @@ private:
     int resolved_mem_group_ = -1;
     int resolved_isp_group_ = -1;
     bool groups_resolved_ = false;
+
+    int mem_group_refcount_ = 0;
+    bool mem_group_created_ = false;
+    bool mem_group_started_ = false;
+    uint32_t mem_chn_out_width_ = 0;
+    uint32_t mem_chn_out_height_ = 0;
+    PixelFormat mem_chn_out_format_ = PixelFormat::UNKNOWN;
+    bool mem_chn_letterbox_ = false;
+    uint8_t mem_chn_pad_value_ = 0;
+    std::mutex mem_group_mutex_;
 };
 #endif
 
