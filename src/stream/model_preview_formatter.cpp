@@ -118,6 +118,16 @@ void populate_preview_boxes(const nlohmann::json& event_data, nlohmann::json* pr
     }
 }
 
+void populate_preview_classes(const nlohmann::json& event_data, nlohmann::json* preview_data) {
+    if (!preview_data || !event_data.contains("classes") || !event_data["classes"].is_array()) {
+        return;
+    }
+    (*preview_data)["classes"] = event_data["classes"];
+    if (event_data.contains("labels") && event_data["labels"].is_array()) {
+        (*preview_data)["labels"] = event_data["labels"];
+    }
+}
+
 std::string encode_preview_image(const lua_cv::Frame& frame,
                                  const ModelPreviewFormatConfig& config) {
     cv::Mat mat = frame.to_mat_copy();
@@ -158,6 +168,7 @@ nlohmann::json build_preview_json(const nlohmann::json& event_data,
     double sy = (src_height > 0 && height > 0) ? static_cast<double>(height) / src_height : 1.0;
     populate_preview_boxes(event_data, &preview_data, sx, sy,
                            static_cast<int>(width), static_cast<int>(height));
+    populate_preview_classes(event_data, &preview_data);
     preview_data["resolution"] = {width, height};
     preview_data["image"] = base64_jpeg;
     return preview_data;
@@ -171,6 +182,7 @@ nlohmann::json build_model_preview_message(
     int* preview_interval_ms) {
     nlohmann::json preview_data = nlohmann::json::object();
     populate_preview_boxes(event_data, &preview_data);
+    populate_preview_classes(event_data, &preview_data);
 
     int frame_width = config.preview_width > 0 ? config.preview_width : event_data.value("frame_width", 0);
     int frame_height = config.preview_height > 0 ? config.preview_height : event_data.value("frame_height", 0);
@@ -210,6 +222,7 @@ nlohmann::json build_model_preview_message(
     int* preview_interval_ms) {
     nlohmann::json preview_data = nlohmann::json::object();
     populate_preview_boxes(event_data, &preview_data);
+    populate_preview_classes(event_data, &preview_data);
 
     int frame_width = config.preview_width > 0 ? config.preview_width : event_data.value("frame_width", 0);
     int frame_height = config.preview_height > 0 ? config.preview_height : event_data.value("frame_height", 0);
