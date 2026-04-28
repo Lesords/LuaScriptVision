@@ -671,13 +671,19 @@ nlohmann::json ModelNode::runFullFrameInference(const lua_cv::Frame& frame,
             auto& pm = execution.preprocess_meta;
             pm.ori_w = cam_w;
             pm.ori_h = cam_h;
-            pm.scale_x = static_cast<float>(pm.input_w) /
-                         static_cast<float>(std::max(1, cam_w));
-            pm.scale_y = static_cast<float>(pm.input_h) /
-                         static_cast<float>(std::max(1, cam_h));
-            pm.scale = pm.scale_x;
-            pm.pad_x = 0;
-            pm.pad_y = 0;
+            // Camera VPSS uses ASPECT_RATIO_AUTO (letterbox), not stretch.
+            // Compute uniform scale and padding to match the hardware behavior.
+            float r = std::min(static_cast<float>(pm.input_w) /
+                                   static_cast<float>(std::max(1, cam_w)),
+                               static_cast<float>(pm.input_h) /
+                                   static_cast<float>(std::max(1, cam_h)));
+            int new_w = static_cast<int>(cam_w * r);
+            int new_h = static_cast<int>(cam_h * r);
+            pm.scale = r;
+            pm.scale_x = r;
+            pm.scale_y = r;
+            pm.pad_x = (pm.input_w - new_w) / 2;
+            pm.pad_y = (pm.input_h - new_h) / 2;
         }
     }
     nlohmann::json meta = build_full_frame_meta(
