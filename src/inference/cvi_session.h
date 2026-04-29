@@ -135,7 +135,6 @@ private:
     std::vector<std::string> input_names_;
     std::vector<std::string> output_names_;
     std::vector<std::shared_ptr<tensor::CviTpuMemory>> input_buffers_;
-    std::vector<std::shared_ptr<tensor::CviTpuMemory>> output_buffers_;
     std::vector<int32_t> all_output_indices_;
 };
 

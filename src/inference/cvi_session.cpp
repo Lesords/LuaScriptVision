@@ -401,7 +401,6 @@ CviSession::~CviSession() {
         CVI_NN_CleanupModel(model_);
         model_ = nullptr;
     }
-    output_buffers_.clear();
     input_buffers_.clear();
     if (owns_rt_handle_ && rt_handle_) {
         CVI_RT_DeInit(rt_handle_);
@@ -458,17 +457,9 @@ void CviSession::init_device_buffers() {
         input_buffers_[static_cast<size_t>(i)] = std::move(buffer);
     }
 
-    output_buffers_.resize(static_cast<size_t>(output_num_));
-    for (int32_t i = 0; i < output_num_; ++i) {
-        size_t bytes = CVI_NN_TensorSize(&output_tensors_[i]);
-        if (bytes == 0) {
-            throw std::runtime_error("CviSession: output tensor size is zero");
-        }
-        auto buffer = tensor::CviTpuMemory::allocate(rt_handle_, bytes);
-        check_cvi_rc(CVI_NN_SetTensorPhysicalAddr(&output_tensors_[i], buffer->physical_addr()),
-                     "CVI_NN_SetTensorPhysicalAddr(output)");
-        output_buffers_[static_cast<size_t>(i)] = std::move(buffer);
-    }
+    // Output buffers: do NOT allocate custom ION memory.
+    // Let CVI-RT manage output memory internally (matches SSCMA engine behavior).
+    // Custom output buffers break FP32 output layers on some cvimodels.
 }
 
 CviSession::TensorInfo CviSession::get_input_info(size_t index) const {
@@ -541,11 +532,6 @@ CviSession::run(const float* input_data, const std::vector<int64_t>& input_shape
                  "CVI_NN_Forward");
     auto t2 = std::chrono::high_resolution_clock::now();
 
-    if (output_buffers_.empty() || !output_buffers_[static_cast<size_t>(primary_output_index_)]) {
-        throw std::runtime_error("CviSession::run - output buffer not initialized");
-    }
-    output_buffers_[static_cast<size_t>(primary_output_index_)]->invalidate_cache();
-
     auto output_data = read_output_tensor(primary_output_index_);
     auto t3 = std::chrono::high_resolution_clock::now();
     auto output_shape = get_output_shape(static_cast<size_t>(primary_output_index_));
@@ -606,9 +592,6 @@ void CviSession::run_all(const float* input_data,
     output_shapes->reserve(static_cast<size_t>(output_num_));
 
     for (int32_t i = 0; i < output_num_; ++i) {
-        if (output_buffers_[static_cast<size_t>(i)]) {
-            output_buffers_[static_cast<size_t>(i)]->invalidate_cache();
-        }
         outputs->push_back(read_output_tensor(i));
         output_shapes->push_back(get_output_shape(static_cast<size_t>(i)));
     }
@@ -690,9 +673,6 @@ void CviSession::run_vb(uint64_t input_phys_addr,
     if (output_num_ < 1 || !output_tensors_) {
         throw std::runtime_error("CviSession::run_vb - no outputs available");
     }
-    if (output_buffers_.size() != static_cast<size_t>(output_num_)) {
-        throw std::runtime_error("CviSession::run_vb - output buffers not initialized");
-    }
     if (input_phys_addr == 0) {
         throw std::invalid_argument("CviSession::run_vb - input physical address is zero");
     }
@@ -742,9 +722,6 @@ void CviSession::run_vb(uint64_t input_phys_addr,
     output_shapes->reserve(static_cast<size_t>(output_num_));
 
     for (int32_t i = 0; i < output_num_; ++i) {
-        if (output_buffers_[static_cast<size_t>(i)]) {
-            output_buffers_[static_cast<size_t>(i)]->invalidate_cache();
-        }
         outputs->push_back(read_output_tensor(i));
         output_shapes->push_back(get_output_shape(static_cast<size_t>(i)));
     }
@@ -777,9 +754,6 @@ void CviSession::run_vb_selected(uint64_t input_phys_addr,
     }
     if (output_num_ < 1 || !output_tensors_) {
         throw std::runtime_error("CviSession::run_vb_selected - no outputs available");
-    }
-    if (output_buffers_.size() != static_cast<size_t>(output_num_)) {
-        throw std::runtime_error("CviSession::run_vb_selected - output buffers not initialized");
     }
     if (input_phys_addr == 0) {
         throw std::invalid_argument("CviSession::run_vb_selected - input physical address is zero");
@@ -1006,15 +980,13 @@ std::vector<float> CviSession::read_output_tensor(int32_t output_index) const {
         throw std::out_of_range("CviSession::read_output_tensor - output index out of range");
     }
 
-    if (output_buffers_.empty() || !output_buffers_[static_cast<size_t>(output_index)]) {
-        throw std::runtime_error("CviSession::read_output_tensor - output buffer not initialized");
-    }
-
     CVI_TENSOR* output_tensor = &output_tensors_[output_index];
     size_t output_count = CVI_NN_TensorCount(output_tensor);
-    void* output_sys = output_buffers_[static_cast<size_t>(output_index)]->data();
+    // Use CVI-RT internal buffer (matches SSCMA engine approach).
+    // Custom ION buffers break FP32 output layers on some cvimodels.
+    void* output_sys = CVI_NN_TensorPtr(output_tensor);
     if (!output_sys) {
-        throw std::runtime_error("CviSession::read_output_tensor - output buffer has no virtual address");
+        throw std::runtime_error("CviSession::read_output_tensor - CVI_NN_TensorPtr returned null");
     }
 
     std::vector<float> output_data(output_count);
@@ -1102,10 +1074,6 @@ void CviSession::collect_selected_outputs(const std::vector<int32_t>& output_ind
     if (selected->empty()) {
         throw std::runtime_error("CviSession::collect_selected_outputs - output indices are empty");
     }
-    if (output_buffers_.size() != static_cast<size_t>(output_num_)) {
-        throw std::runtime_error("CviSession::collect_selected_outputs - output buffers not initialized");
-    }
-
     std::vector<uint8_t> seen(static_cast<size_t>(output_num_), 0);
     for (int32_t idx : *selected) {
         if (idx < 0 || idx >= output_num_) {
@@ -1116,9 +1084,6 @@ void CviSession::collect_selected_outputs(const std::vector<int32_t>& output_ind
             throw std::runtime_error("CviSession::collect_selected_outputs - duplicate output index");
         }
         seen[sidx] = 1;
-        if (!output_buffers_[sidx]) {
-            throw std::runtime_error("CviSession::collect_selected_outputs - output buffer not initialized");
-        }
     }
 
     outputs->clear();
@@ -1127,10 +1092,8 @@ void CviSession::collect_selected_outputs(const std::vector<int32_t>& output_ind
     output_shapes->reserve(selected->size());
 
     for (int32_t idx : *selected) {
-        size_t sidx = static_cast<size_t>(idx);
-        output_buffers_[sidx]->invalidate_cache();
         outputs->push_back(read_output_tensor(idx));
-        output_shapes->push_back(get_output_shape(sidx));
+        output_shapes->push_back(get_output_shape(static_cast<size_t>(idx)));
     }
 }
 
