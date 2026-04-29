@@ -523,15 +523,9 @@ void CviVpssProcessor::ensure_channel(uint32_t out_width, uint32_t out_height, P
         return;
     }
 
-    std::cerr << "[VPSS-RECFG] grp=" << grp_ << " chn=" << chn_
-              << " shared=" << ctx.mem_vpss_chn_out_width() << "x" << ctx.mem_vpss_chn_out_height()
-              << " -> " << out_width << "x" << out_height
-              << " grp_started=" << ctx.mem_vpss_group_started() << std::endl;
-
     // When the group is already running, a full StopGrp → ResetGrp cycle is required
     // to reinitialize the VPSS hardware pipeline before applying new channel attributes.
     if (ctx.mem_vpss_group_started()) {
-        std::cerr << "[VPSS-RECFG] StopGrp+ResetGrp cycle on grp=" << grp_ << std::endl;
         CVI_VPSS_DisableChn(grp_, chn_);
         CVI_S32 stop_rc = CVI_VPSS_StopGrp(grp_);
         if (stop_rc != CVI_SUCCESS) {
@@ -551,7 +545,6 @@ void CviVpssProcessor::ensure_channel(uint32_t out_width, uint32_t out_height, P
             std::cerr << "[VPSS-RECFG] ResetGrp failed: 0x" << std::hex << reset_rc << std::dec << std::endl;
         }
         ctx.set_mem_vpss_group_started(false);
-        std::cerr << "[VPSS-RECFG] StopGrp+ResetGrp done" << std::endl;
     }
 
     CVI_VPSS_DisableChn(grp_, chn_);
