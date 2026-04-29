@@ -114,8 +114,8 @@ function Model.postprocess(outputs, meta)
             local spatial = math.floor(idx / num_anchors)
             local col = spatial % feat_w
             local row = math.floor(spatial / feat_w)
-            local cx = (col + 0.5) * stride + anchor * 0.5 * stride
-            local cy = (row + 0.5) * stride + anchor * 0.5 * stride
+            local cx = col * stride + anchor * 0.5 * stride
+            local cy = row * stride + anchor * 0.5 * stride
 
             -- Distance-based bbox decode
             local dl = bbox_flat:at(idx, 0) * stride
