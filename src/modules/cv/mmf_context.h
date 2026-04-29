@@ -56,7 +56,7 @@ public:
     struct Config {
         VbPoolPlan vb_plan;
         ModePlan mode_plan;
-        bool force_reset = false;
+        bool force_reset = true;
     };
 
     static MmfContext& instance();

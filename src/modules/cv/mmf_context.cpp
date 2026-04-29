@@ -495,6 +495,7 @@ bool MmfContext::init(const Config& config) {
     }
 
     if (config.force_reset) {
+        std::cout << "[MMF] Defensive reset: clearing residual VB/SYS state" << std::endl;
         CVI_SYS_Exit();
         CVI_VB_Exit();
     }
