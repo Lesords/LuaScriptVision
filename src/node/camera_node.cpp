@@ -888,15 +888,18 @@ void CameraNode::streamEncodeLoop() {
         if (!stream_encoder_.encoder->get_stream(&stream, 100)) {
             continue;
         }
-
-        // Broadcast to WebSocket clients
-        if (stream_encoder_.ws && stream_encoder_.ws->is_running()) {
-            stream_encoder_.ws->broadcast_binary(
-                stream.data.data(),
-                stream.data.size());
-        }
-
+        // Release VENC output buffer immediately to free VPSS channel resources.
+        // get_stream() copies data into EncodedStream, so release can happen
+        // before broadcast without losing the encoded frame data.
         stream_encoder_.encoder->release_stream();
+
+        // Only broadcast when clients are connected to prevent unbounded
+        // queue growth on the embedded device.
+        if (stream_encoder_.ws && stream_encoder_.ws->client_count() > 0 &&
+            stream_encoder_.ws->is_running()) {
+            stream_encoder_.ws->broadcast_binary(
+                stream.data.data(), stream.data.size());
+        }
     }
 }
 
