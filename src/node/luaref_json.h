@@ -30,9 +30,9 @@ inline bool is_lua_array(const LuaIntf::LuaRef& ref) {
     }
 
     // Pure array: has integer keys, no string keys, and indices are consecutive
-    // Empty table: treat as object (JSON convention)
+    // Empty table: treat as array (model postprocess returns empty array for no results)
     if (has_string_key) return false;
-    if (count == 0) return false;  // Empty table -> object
+    if (count == 0) return true;   // Empty table -> array
     return count == max_index;     // Check consecutive: {1,2,3} count=3, max=3
 }
 
