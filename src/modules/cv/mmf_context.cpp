@@ -11,6 +11,18 @@ namespace lua_cv {
 #include <cvi_vpss.h>
 
 namespace {
+
+void force_hardware_cleanup() {
+    for (int grp = 0; grp < VPSS_MAX_GRP_NUM; ++grp) {
+        if (CVI_VPSS_StopGrp(grp) == CVI_SUCCESS) {
+            for (int chn = 0; chn < VPSS_MAX_CHN_NUM; ++chn) {
+                CVI_VPSS_DisableChn(grp, chn);
+            }
+            CVI_VPSS_DestroyGrp(grp);
+        }
+    }
+}
+
 struct Resolution {
     uint32_t width = 0;
     uint32_t height = 0;
@@ -495,7 +507,8 @@ bool MmfContext::init(const Config& config) {
     }
 
     if (config.force_reset) {
-        std::cout << "[MMF] Defensive reset: clearing residual VB/SYS state" << std::endl;
+        std::cout << "[MMF] Defensive reset: clearing residual hardware state" << std::endl;
+        force_hardware_cleanup();
         CVI_SYS_Exit();
         CVI_VB_Exit();
     }
