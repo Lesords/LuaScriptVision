@@ -565,6 +565,14 @@ void ModelNode::inferLoop() {
         try {
             nlohmann::json result = runInference(ctx->frame->frame(), ctx->upstream_result);
 
+            // Release VPSS frame immediately when no downstream nodes exist.
+            // After inference the frame data is only needed by forwardToDownstream;
+            // if there are no subscribers, the VPSS buffer can be freed right away.
+            if (ctx->frame && downstream_.empty()) {
+                ctx->frame->release();
+                ctx->frame = nullptr;
+            }
+
             auto t_end = std::chrono::steady_clock::now();
             double elapsed_ms = std::chrono::duration<double, std::milli>(t_end - t_start).count();
 
