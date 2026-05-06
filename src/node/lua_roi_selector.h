@@ -9,10 +9,10 @@ struct lua_State;
 
 namespace node {
 
-std::vector<Roi> select_valid_rois(lua_State* L,
-                                   const LuaIntf::LuaRef& selector,
-                                   int frame_width,
-                                   int frame_height,
-                                   const nlohmann::json& upstream);
+std::vector<SelectedRoi> select_valid_rois(lua_State* L,
+                                           const LuaIntf::LuaRef& selector,
+                                           int frame_width,
+                                           int frame_height,
+                                           const nlohmann::json& upstream);
 
 }  // namespace node

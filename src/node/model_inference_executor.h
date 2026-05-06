@@ -62,7 +62,7 @@ FullFrameExecutionResult execute_full_frame_inference(const lua_cv::Frame& frame
                                                       const ModelExecutorConfig& config);
 
 RoiExecutionResult execute_roi_inference(const lua_cv::Frame& frame,
-                                         const Roi& roi,
+                                         const SelectedRoi& roi,
                                          const ModelExecutorConfig& config);
 
 }  // namespace node

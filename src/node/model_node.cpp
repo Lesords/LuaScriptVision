@@ -736,7 +736,7 @@ nlohmann::json ModelNode::runFullFrameInference(const lua_cv::Frame& frame,
 
 nlohmann::json ModelNode::runCroppedRoiInference(const lua_cv::Frame& frame,
                                                   const nlohmann::json& upstream) {
-    std::vector<Roi> rois = select_valid_rois(
+    std::vector<SelectedRoi> rois = select_valid_rois(
         L_, select_rois_, frame.width(), frame.height(), upstream);
     if (rois.empty()) {
         return {{"items", nlohmann::json::array()}};
@@ -760,7 +760,7 @@ nlohmann::json ModelNode::runCroppedRoiInference(const lua_cv::Frame& frame,
 }
 
 nlohmann::json ModelNode::runSingleRoiInference(const lua_cv::Frame& frame,
-                                                const Roi& roi,
+                                                const SelectedRoi& roi,
                                                 const nlohmann::json& upstream,
                                                 RoiBatchMetrics* metrics) {
     double postprocess_ms_local = 0.0;

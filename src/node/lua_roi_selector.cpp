@@ -5,11 +5,11 @@
 
 namespace node {
 
-std::vector<Roi> select_valid_rois(lua_State* L,
-                                   const LuaIntf::LuaRef& selector,
-                                   int frame_width,
-                                   int frame_height,
-                                   const nlohmann::json& upstream) {
+std::vector<SelectedRoi> select_valid_rois(lua_State* L,
+                                           const LuaIntf::LuaRef& selector,
+                                           int frame_width,
+                                           int frame_height,
+                                           const nlohmann::json& upstream) {
     if (!selector.isFunction()) {
         return {};
     }
@@ -21,15 +21,15 @@ std::vector<Roi> select_valid_rois(lua_State* L,
         return {};
     }
 
-    std::vector<Roi> rois;
+    std::vector<SelectedRoi> rois;
     rois.reserve(rois_json.size());
     for (const auto& roi_item : rois_json) {
-        Roi roi;
-        if (!parse_roi(roi_item, &roi)) {
+        SelectedRoi roi;
+        if (!parse_selected_roi(roi_item, &roi)) {
             continue;
         }
-        if (clamp_roi_to_bounds(frame_width, frame_height, &roi)) {
-            rois.push_back(roi);
+        if (clamp_selected_roi_to_bounds(frame_width, frame_height, &roi)) {
+            rois.push_back(std::move(roi));
         }
     }
     return rois;

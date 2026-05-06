@@ -14,7 +14,7 @@ nlohmann::json build_full_frame_meta(const nlohmann::json& upstream,
                                      int output_count,
                                      const PreprocessMeta& preprocess_meta);
 
-nlohmann::json build_roi_meta(const Roi& roi,
+nlohmann::json build_roi_meta(const SelectedRoi& roi,
                               const nlohmann::json& upstream,
                               float threshold,
                               const PreprocessMeta& preprocess_meta);

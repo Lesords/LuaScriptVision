@@ -67,7 +67,7 @@ private:
     nlohmann::json runFullFrameInference(const lua_cv::Frame& frame, const nlohmann::json& upstream);
     nlohmann::json runCroppedRoiInference(const lua_cv::Frame& frame, const nlohmann::json& upstream);
     nlohmann::json runSingleRoiInference(const lua_cv::Frame& frame,
-                                         const Roi& roi,
+                                         const SelectedRoi& roi,
                                          const nlohmann::json& upstream,
                                          RoiBatchMetrics* metrics);
     nlohmann::json callPostprocess(
