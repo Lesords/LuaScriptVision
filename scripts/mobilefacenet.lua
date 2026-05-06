@@ -10,8 +10,12 @@ Model.config = {
 }
 
 Model.preprocess_config = {
-    type = "resize",
+    type = "face_align",
     input_size = {112, 112},
+    normalize = true,
+    scale = 1.0,
+    mean = {127.5, 127.5, 127.5},
+    std = {128.0, 128.0, 128.0},
 }
 
 function Model.select_rois(upstream)
@@ -20,7 +24,7 @@ function Model.select_rois(upstream)
     print(string.format("[MobileFaceNet] select_rois: received %d boxes from upstream", #boxes))
     for _, box in ipairs(boxes) do
         if box.w >= Model.config.min_face_size and box.h >= Model.config.min_face_size then
-            table.insert(rois, {x = box.x, y = box.y, w = box.w, h = box.h})
+            table.insert(rois, box)
         end
     end
     print(string.format("[MobileFaceNet] select_rois: %d ROIs after min_size filter", #rois))
@@ -62,26 +66,16 @@ function Model.postprocess(outputs, meta)
         table.insert(embedding, emb_tensor:at(i, 0) / norm)
     end
 
-    -- Match ROI back to original SCRFD box for metadata
     local roi = meta.roi or {}
-    local matched_box = nil
-    local upstream_boxes = (meta.upstream and meta.upstream.boxes) or {}
-    for _, box in ipairs(upstream_boxes) do
-        if box.x == roi.x and box.y == roi.y and box.w == roi.w and box.h == roi.h then
-            matched_box = box
-            break
-        end
-    end
+    local source = meta.source or {}
 
     local result = {
         roi = roi,
         embedding = embedding,
     }
-    if matched_box then
-        result.score = matched_box.score
-        result.label = "face"
-        result.keypoints = matched_box.keypoints
-    end
+    result.score = source.score
+    result.label = source.label or "face"
+    result.keypoints = source.keypoints
 
     return result
 end

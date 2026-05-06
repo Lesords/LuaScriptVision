@@ -9,7 +9,7 @@ namespace node {
 
 // Preprocess configuration parsed from Lua script
 struct PreprocessConfig {
-    std::string type = "letterbox";     // "letterbox", "resize", "none"
+    std::string type = "letterbox";     // "letterbox", "resize", "face_align", "none"
     int input_width = 640;
     int input_height = 640;
     int stride = 32;

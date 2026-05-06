@@ -25,6 +25,16 @@
 namespace node {
 namespace {
 
+constexpr float kArcFaceReferenceWidth = 112.0f;
+constexpr float kArcFaceReferenceHeight = 112.0f;
+const std::array<cv::Point2f, 5> kArcFaceReferencePoints = {{
+    {38.2946f, 51.6963f},
+    {73.5318f, 51.5014f},
+    {56.0252f, 71.7366f},
+    {41.5493f, 92.3655f},
+    {70.7299f, 92.2041f},
+}};
+
 // Limits concurrent VPSS preprocess + TPU inference to match VB pool capacity.
 // Pool 3 has VB_POOL3_TOTAL blocks; exceeding this causes NOBUF (0xc006800e).
 class VpssSlotSemaphore {
@@ -79,6 +89,53 @@ void fill_resize_meta(int source_w,
     meta->ori_h = source_h;
     meta->input_w = target_w;
     meta->input_h = target_h;
+}
+
+std::array<cv::Point2f, 5> scaled_arcface_reference_points(int target_w, int target_h) {
+    const float scale_x = static_cast<float>(target_w) / kArcFaceReferenceWidth;
+    const float scale_y = static_cast<float>(target_h) / kArcFaceReferenceHeight;
+    std::array<cv::Point2f, 5> points = kArcFaceReferencePoints;
+    for (auto& point : points) {
+        point.x *= scale_x;
+        point.y *= scale_y;
+    }
+    return points;
+}
+
+cv::Mat align_face(const cv::Mat& source,
+                   const SelectedRoi& roi,
+                   int target_w,
+                   int target_h,
+                   int fill_value) {
+    if (source.empty() || !roi.has_keypoints) {
+        return cv::Mat();
+    }
+
+    std::vector<cv::Point2f> source_points;
+    source_points.reserve(roi.keypoints.size());
+    for (const auto& keypoint : roi.keypoints) {
+        source_points.emplace_back(keypoint.x, keypoint.y);
+    }
+
+    auto reference = scaled_arcface_reference_points(target_w, target_h);
+    std::vector<cv::Point2f> target_points(reference.begin(), reference.end());
+    // Use getAffineTransform (imgproc) instead of estimateAffinePartial2D (calib3d)
+    // since the cross-compile OpenCV may not include calib3d module.
+    // Both produce the same 2x3 affine matrix when given exactly 3 point pairs.
+    cv::Mat affine = cv::getAffineTransform(source_points, target_points);
+    if (affine.empty()) {
+        return cv::Mat();
+    }
+
+    cv::Mat aligned;
+    cv::warpAffine(source,
+                   aligned,
+                   affine,
+                   cv::Size(target_w, target_h),
+                   cv::INTER_LINEAR,
+                   cv::BORDER_CONSTANT,
+                   cv::Scalar(fill_value, fill_value, fill_value));
+    return aligned;
 }
 
 #ifdef USE_CVI_TPU
@@ -385,7 +442,8 @@ RoiExecutionResult execute_roi_inference(const lua_cv::Frame& frame,
     // Limit concurrent VPSS preprocess to available VB pool blocks.
     VpssSlotGuard vpss_guard(vpss_slot_semaphore());
 
-    if (config.session->supports_vb_input() &&
+    if (preprocess_type != "face_align" &&
+        config.session->supports_vb_input() &&
         frame.storage_type() == lua_cv::Frame::StorageType::CVI) {
         auto spec = config.session->get_vb_input_spec();
         lua_cv::PixelFormat out_pf = lua_cv::from_cvi_pixel_format(spec.pixel_format);
@@ -496,19 +554,22 @@ RoiExecutionResult execute_roi_inference(const lua_cv::Frame& frame,
 #endif
     } else {
         cv::Mat mat;
+        cv::Mat src;
         bool skip_preprocess = false;
         if (!preprocessed.empty()) {
             mat = preprocessed.to_mat_copy();
             skip_preprocess = true;
         } else {
-            cv::Mat src = frame.to_mat_copy();
+            src = frame.to_mat_copy();
             if (src.empty()) {
                 result.valid = false;
                 return result;
             }
 
-            cv::Rect roi_rect(roi.roi.x, roi.roi.y, roi.roi.w, roi.roi.h);
-            mat = src(roi_rect).clone();
+            if (preprocess_type != "face_align") {
+                cv::Rect roi_rect(roi.roi.x, roi.roi.y, roi.roi.w, roi.roi.h);
+                mat = src(roi_rect).clone();
+            }
         }
 
         auto t_cpu_start = std::chrono::steady_clock::now();
@@ -546,6 +607,19 @@ RoiExecutionResult execute_roi_inference(const lua_cv::Frame& frame,
             int cx = (rw - target_w) / 2;
             int cy = (rh - target_h) / 2;
             mat = mat(cv::Rect(cx, cy, target_w, target_h)).clone();
+            fill_resize_meta(roi.roi.w, roi.roi.h, target_w, target_h, &result.preprocess_meta);
+        } else if (!skip_preprocess && preprocess_type == "face_align") {
+            if (!roi.has_keypoints) {
+                result.warning = ExecutionWarning{"Face alignment skipped", "ROI is missing 5-point landmarks"};
+                result.valid = false;
+                return result;
+            }
+            mat = align_face(src, roi, target_w, target_h, preprocess.fill_value);
+            if (mat.empty()) {
+                result.warning = ExecutionWarning{"Face alignment failed", "Failed to estimate affine transform"};
+                result.valid = false;
+                return result;
+            }
             fill_resize_meta(roi.roi.w, roi.roi.h, target_w, target_h, &result.preprocess_meta);
         } else if (!skip_preprocess &&
                    (preprocess_type == "resize" || preprocess_type == "none")) {
