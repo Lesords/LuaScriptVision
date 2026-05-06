@@ -563,7 +563,24 @@ void ModelNode::inferLoop() {
         }
 #else
         try {
-            nlohmann::json result = runInference(ctx->frame->frame(), ctx->upstream_result);
+            nlohmann::json result;
+            if (config_.input_mode == CROPPED_ROI && upstream_camera_) {
+                // CROPPED_ROI needs the original-resolution frame for accurate cropping.
+                // The infer frame (640x640) would mangle upstream coordinates (1920x1080).
+                SharedFrame* sf = ctx->has_stream_frame()
+                    ? ctx->stream_frame
+                    : upstream_camera_->grab_latest_stream_frame();
+                if (sf) {
+                    result = runInference(sf->frame(), ctx->upstream_result);
+                    if (!ctx->has_stream_frame()) {
+                        sf->release();
+                    }
+                } else {
+                    result = runInference(ctx->frame->frame(), ctx->upstream_result);
+                }
+            } else {
+                result = runInference(ctx->frame->frame(), ctx->upstream_result);
+            }
 
             // Release VPSS frame immediately when no downstream nodes exist.
             // After inference the frame data is only needed by forwardToDownstream;
