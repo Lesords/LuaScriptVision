@@ -111,14 +111,16 @@ cv::Mat align_face(const cv::Mat& source,
         return cv::Mat();
     }
 
-    std::vector<cv::Point2f> source_points;
-    source_points.reserve(roi.keypoints.size());
-    for (const auto& keypoint : roi.keypoints) {
-        source_points.emplace_back(keypoint.x, keypoint.y);
-    }
+    // getAffineTransform requires exactly 3 point pairs.
+    // Use left eye, right eye, nose tip (indices 0, 1, 2).
+    std::vector<cv::Point2f> source_points = {
+        cv::Point2f(roi.keypoints[0].x, roi.keypoints[0].y),
+        cv::Point2f(roi.keypoints[1].x, roi.keypoints[1].y),
+        cv::Point2f(roi.keypoints[2].x, roi.keypoints[2].y),
+    };
 
     auto reference = scaled_arcface_reference_points(target_w, target_h);
-    std::vector<cv::Point2f> target_points(reference.begin(), reference.end());
+    std::vector<cv::Point2f> target_points = {reference[0], reference[1], reference[2]};
     // Use getAffineTransform (imgproc) instead of estimateAffinePartial2D (calib3d)
     // since the cross-compile OpenCV may not include calib3d module.
     // Both produce the same 2x3 affine matrix when given exactly 3 point pairs.
