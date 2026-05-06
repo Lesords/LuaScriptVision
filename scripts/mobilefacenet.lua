@@ -12,6 +12,7 @@ Model.config = {
 Model.preprocess_config = {
     type = "face_align",
     input_size = {112, 112},
+    format = "hwc",
     normalize = true,
     scale = 1.0,
     mean = {127.5, 127.5, 127.5},
