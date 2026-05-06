@@ -846,14 +846,28 @@ void ModelNode::forwardToDownstream(PipelineContext* ctx, const nlohmann::json& 
         return;
     }
 
+    // Deep-copy stream_frame to CPU Mat before forwarding.
+    // The original stream_frame is a VB-backed pool block (scarce resource).
+    // Downstream nodes may hold it for extended periods (e.g. CROPPED_ROI
+    // iterating multiple ROIs at ~100ms each), starving CameraNode/VENC
+    // of VB blocks. Deep-copy releases the VB block immediately after
+    // SCRFD deletes its context, instead of waiting for downstream to finish.
+    SharedFrame* cpu_stream = nullptr;
+    if (ctx->stream_frame) {
+        cv::Mat mat_copy = ctx->stream_frame->frame().to_mat_copy();
+        if (!mat_copy.empty()) {
+            cpu_stream = new SharedFrame(lua_cv::Frame(std::move(mat_copy)));
+        }
+    }
+
     std::lock_guard<std::mutex> lock(subscribers_mutex_);
     for (auto* mbox : downstream_) {
         ctx->frame->ref();
-        if (ctx->stream_frame) ctx->stream_frame->ref();
+        if (cpu_stream) cpu_stream->ref();
 
         auto* next_ctx = new PipelineContext{
             ctx->frame,
-            ctx->stream_frame,
+            cpu_stream,
             result,
             ctx->frame_id
         };
@@ -861,6 +875,13 @@ void ModelNode::forwardToDownstream(PipelineContext* ctx, const nlohmann::json& 
         if (!mbox->post(next_ctx, 0)) {
             delete next_ctx;
         }
+    }
+
+    // Release our initial ref to the CPU copy. Each downstream context
+    // holds its own ref via the loop above. When all downstream contexts
+    // are deleted, ref_count reaches 0 and the CPU SharedFrame is freed.
+    if (cpu_stream) {
+        cpu_stream->release();
     }
 }
 
