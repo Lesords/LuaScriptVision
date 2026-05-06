@@ -553,6 +553,17 @@ void ModelNode::inferLoop() {
             continue;
         }
 
+        // CROPPED_ROI: skip CameraNode direct contexts (empty upstream_result).
+        // Only process contexts forwarded from upstream ModelNode, which carry
+        // the detection results needed by select_rois(). CameraNode subscribes
+        // us to its INFER channel for upstream_camera_ access, but its direct
+        // contexts have no upstream_result — they'd always produce 0 ROIs and
+        // flood the pipeline.
+        if (config_.input_mode == CROPPED_ROI && ctx->is_from_camera()) {
+            delete ctx;
+            continue;
+        }
+
         auto t_start = std::chrono::steady_clock::now();
 
 #ifdef SKIP_INFER_TEST
