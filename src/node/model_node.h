@@ -53,6 +53,7 @@ public:
     uint64_t infer_count() const { return infer_count_.load(std::memory_order_relaxed); }
     uint64_t error_count() const { return error_count_.load(std::memory_order_relaxed); }
     double infer_ema_ms() const { return infer_ema_ms_; }
+    InputMode input_mode() const { return config_.input_mode; }
 
 private:
     int parseConfig(const nlohmann::json& config);
