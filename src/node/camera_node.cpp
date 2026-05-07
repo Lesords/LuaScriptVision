@@ -684,13 +684,17 @@ bool CameraNode::shouldSkipFrame() {
 }
 
 void CameraNode::updateSkipTiming() {
-    // Get maximum downstream processing time
-    double max_proc_ms = getMaxDownstreamProcMs();
+    // Use aggregate (sum) of ALL downstream processing times.
+    // Models share a single TPU, so they are serialized: the total time to
+    // process one frame through all models is the sum of individual times.
+    // Using MAX would underestimate the pipeline latency, causing the camera
+    // to produce frames faster than the pipeline can consume them.
+    double load_ms = getAggregateDownstreamMs();
 
     // EWMA smoothing
-    if (max_proc_ms > 0) {
+    if (load_ms > 0) {
         skip_state_.infer_ema_ms =
-            skip_state_.kEmaAlpha * max_proc_ms +
+            skip_state_.kEmaAlpha * load_ms +
             (1.0 - skip_state_.kEmaAlpha) * skip_state_.infer_ema_ms;
     }
 
@@ -709,13 +713,27 @@ void CameraNode::updateSkipTiming() {
     skip_state_.skip_state_ready = true;
 }
 
+double CameraNode::getAggregateDownstreamMs() const {
+    std::lock_guard<std::mutex> lock(timing_mutex_);
+
+    auto now = std::chrono::steady_clock::now();
+    double total_ms = 0.0;
+
+    for (const auto& [node_id, timing] : downstream_timings_) {
+        if (now - timing.last_report <= kTimingStaleThreshold) {
+            total_ms += timing.proc_ms;
+        }
+    }
+
+    return total_ms;
+}
+
 double CameraNode::getMaxDownstreamProcMs() const {
     std::lock_guard<std::mutex> lock(timing_mutex_);
 
     auto now = std::chrono::steady_clock::now();
     double max_proc_ms = 0.0;
 
-    // Find max (don't erase in const method - stale entries handled elsewhere)
     for (const auto& [node_id, timing] : downstream_timings_) {
         if (now - timing.last_report <= kTimingStaleThreshold) {
             max_proc_ms = std::max(max_proc_ms, timing.proc_ms);

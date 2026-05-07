@@ -213,6 +213,7 @@ private:
     bool hasStreamSubscribers() const;
     bool shouldSkipFrame();
     void updateSkipTiming();
+    double getAggregateDownstreamMs() const;
     double getMaxDownstreamProcMs() const;
     double effectiveInferFps() const;
     int computeNobufThreshold() const;
