@@ -1003,6 +1003,19 @@ void CameraNode::shutdownPreviewEncoder() {
         preview_encoder_.encoder.reset();
     }
 
+    // Disable VPSS Chn(2) and flush residual frames from the output queue.
+    // Without this, VPSS keeps producing frames with no consumer, exhausting
+    // Pool 2 and stalling the entire VPSS Grp(0) pipeline.
+    if (camera_ && camera_->vpss_preview_enabled()) {
+        VPSS_GRP grp = static_cast<VPSS_GRP>(camera_->vpss_group());
+        VPSS_CHN chn = static_cast<VPSS_CHN>(camera_->vpss_preview_channel());
+        VIDEO_FRAME_INFO_S frame;
+        while (CVI_VPSS_GetChnFrame(grp, chn, &frame, 0) == CVI_SUCCESS) {
+            CVI_VPSS_ReleaseChnFrame(grp, chn, &frame);
+        }
+        CVI_VPSS_DisableChn(grp, chn);
+    }
+
     {
         std::lock_guard<std::mutex> lock(preview_encoder_.jpeg_mutex);
         preview_encoder_.latest_jpeg.clear();
