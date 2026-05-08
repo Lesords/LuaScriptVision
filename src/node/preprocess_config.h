@@ -22,6 +22,10 @@ struct PreprocessConfig {
     std::string format = "chw";         // "chw" or "hwc"
     std::string dtype = "float32";      // "float32" or "int8"
 
+    // Debug: save preprocessed ROI crop to disk
+    bool save_crop = false;
+    std::string save_path = "/tmp";
+
     static PreprocessConfig fromLuaRef(LuaIntf::LuaRef& ref) {
         PreprocessConfig cfg;
         if (!ref.isTable()) {
@@ -97,6 +101,15 @@ struct PreprocessConfig {
         LuaIntf::LuaRef dtype_ref = ref["dtype"].value<LuaIntf::LuaRef>();
         if (is_type(dtype_ref, LuaIntf::LuaTypeID::STRING)) {
             cfg.dtype = dtype_ref.toValue<std::string>();
+        }
+
+        LuaIntf::LuaRef save_crop_ref = ref["save_crop"].value<LuaIntf::LuaRef>();
+        if (is_type(save_crop_ref, LuaIntf::LuaTypeID::BOOLEAN)) {
+            cfg.save_crop = save_crop_ref.toValue<bool>();
+        }
+        LuaIntf::LuaRef save_path_ref = ref["save_path"].value<LuaIntf::LuaRef>();
+        if (is_type(save_path_ref, LuaIntf::LuaTypeID::STRING)) {
+            cfg.save_path = save_path_ref.toValue<std::string>();
         }
 
         return cfg;

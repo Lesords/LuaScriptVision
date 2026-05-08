@@ -623,12 +623,20 @@ RoiExecutionResult execute_roi_inference(const lua_cv::Frame& frame,
                 return result;
             }
             fill_resize_meta(roi.roi.w, roi.roi.h, target_w, target_h, &result.preprocess_meta);
+            if (preprocess.save_crop) {
+                static int face_debug_idx = 0;
+                cv::imwrite(preprocess.save_path + "/face_align_" + std::to_string(face_debug_idx++) + ".jpg", mat);
+            }
         } else if (!skip_preprocess &&
                    (preprocess_type == "resize" || preprocess_type == "none")) {
             if (mat.cols != target_w || mat.rows != target_h || preprocess_type == "resize") {
                 cv::resize(mat, mat, cv::Size(target_w, target_h));
             }
             fill_resize_meta(roi.roi.w, roi.roi.h, target_w, target_h, &result.preprocess_meta);
+            if (preprocess.save_crop) {
+                static int roi_debug_idx = 0;
+                cv::imwrite(preprocess.save_path + "/roi_crop_" + std::to_string(roi_debug_idx++) + ".jpg", mat);
+            }
         } else if (!skip_preprocess) {
             throw std::runtime_error("Unsupported preprocess type: " + preprocess.type);
         }

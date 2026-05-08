@@ -18,6 +18,8 @@ Model.preprocess_config = {
     input_size = {112, 112},
     format = "hwc",
     normalize = false,
+    save_crop = false,
+    save_path = "/tmp",
 }
 
 function Model.select_rois(upstream)
