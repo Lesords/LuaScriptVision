@@ -576,8 +576,6 @@ void ModelNode::inferLoop() {
         try {
             nlohmann::json result;
             if (config_.input_mode == CROPPED_ROI && upstream_camera_) {
-                // CROPPED_ROI needs the original-resolution frame for accurate cropping.
-                // The infer frame (640x640) would mangle upstream coordinates (1920x1080).
                 SharedFrame* sf = ctx->has_stream_frame()
                     ? ctx->stream_frame
                     : upstream_camera_->grab_latest_stream_frame();
@@ -860,8 +858,6 @@ void ModelNode::forwardToDownstream(PipelineContext* ctx, const nlohmann::json& 
     }
 
     // Check if any downstream node is CROPPED_ROI mode.
-    // ROI nodes hold frames for extended periods (multi-ROI ~400ms) and need
-    // CPU copies to avoid starving CameraNode/VENC of VB pool blocks.
     bool has_roi_downstream = false;
     for (const auto& [dep_id, dep] : dependents_) {
         if (auto* model_dep = dynamic_cast<ModelNode*>(dep)) {
@@ -872,28 +868,27 @@ void ModelNode::forwardToDownstream(PipelineContext* ctx, const nlohmann::json& 
         }
     }
 
+    // For CROPPED_ROI downstream: convert VB stream frame to CPU mat upfront
+    // so VB blocks are released immediately, not held during inbox transit.
     SharedFrame* cpu_stream = nullptr;
-    if (ctx->stream_frame) {
-        cv::Mat mat_copy = ctx->stream_frame->frame().to_mat_copy();
-        if (!mat_copy.empty()) {
-            cpu_stream = new SharedFrame(lua_cv::Frame(std::move(mat_copy)));
-        }
-    } else if (has_roi_downstream && upstream_camera_) {
-        SharedFrame* sf = upstream_camera_->grab_latest_stream_frame();
-        if (sf) {
-            cv::Mat mat_copy = sf->frame().to_mat_copy();
-            sf->release();
+    if (has_roi_downstream) {
+        SharedFrame* vb_sf = ctx->stream_frame
+            ? ctx->stream_frame
+            : (upstream_camera_ ? upstream_camera_->grab_latest_stream_frame() : nullptr);
+        if (vb_sf) {
+            cv::Mat mat_copy = vb_sf->frame().to_mat_copy();
             if (!mat_copy.empty()) {
                 cpu_stream = new SharedFrame(lua_cv::Frame(std::move(mat_copy)));
+            }
+            // Release VB stream frame immediately after conversion.
+            if (vb_sf != ctx->stream_frame) {
+                vb_sf->release();
             }
         }
     }
 
     std::lock_guard<std::mutex> lock(subscribers_mutex_);
     for (auto* mbox : downstream_) {
-        // When cpu_stream is available, skip forwarding the INFER VB frame.
-        // CROPPED_ROI downstream nodes use cpu_stream for inference and don't
-        // need the INFER VB block — releasing it early frees Pool 4 blocks.
         SharedFrame* fwd_frame = cpu_stream ? nullptr : ctx->frame;
         if (fwd_frame) fwd_frame->ref();
         if (cpu_stream) cpu_stream->ref();
@@ -910,9 +905,6 @@ void ModelNode::forwardToDownstream(PipelineContext* ctx, const nlohmann::json& 
         }
     }
 
-    // Release our initial ref to the CPU copy. Each downstream context
-    // holds its own ref via the loop above. When all downstream contexts
-    // are deleted, ref_count reaches 0 and the CPU SharedFrame is freed.
     if (cpu_stream) {
         cpu_stream->release();
     }

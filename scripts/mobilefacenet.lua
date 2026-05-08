@@ -10,13 +10,14 @@ Model.config = {
 }
 
 Model.preprocess_config = {
-    type = "face_align",
+    -- CPU inference path: crop → resize → float tensor → quantize → TPU Forward.
+    -- normalize must be false to avoid double normalization:
+    -- CPU sends raw pixel values (0-255), TPU applies model's internal
+    -- normalization (mean/scale embedded in cvimodel), matching VB-path behavior.
+    type = "resize",
     input_size = {112, 112},
     format = "hwc",
-    normalize = true,
-    scale = 1.0,
-    mean = {127.5, 127.5, 127.5},
-    std = {128.0, 128.0, 128.0},
+    normalize = false,
 }
 
 function Model.select_rois(upstream)
