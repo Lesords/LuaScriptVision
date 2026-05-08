@@ -590,6 +590,30 @@ void ModelNode::inferLoop() {
                     result = {{"items", nlohmann::json::array()}};
                 }
             } else {
+                // Pre-capture stream frame for downstream CROPPED_ROI nodes.
+                // Deep copy BEFORE inference to minimize timing gap between
+                // inference coordinates and the stream frame used for ROI cropping.
+                if (!ctx->stream_frame && upstream_camera_) {
+                    bool has_roi_ds = false;
+                    for (const auto& [dep_id, dep] : dependents_) {
+                        if (auto* m = dynamic_cast<ModelNode*>(dep)) {
+                            if (m->input_mode() == CROPPED_ROI) {
+                                has_roi_ds = true;
+                                break;
+                            }
+                        }
+                    }
+                    if (has_roi_ds) {
+                        SharedFrame* vb_sf = upstream_camera_->grab_latest_stream_frame();
+                        if (vb_sf) {
+                            cv::Mat mat_copy = vb_sf->frame().to_mat_copy();
+                            if (!mat_copy.empty()) {
+                                ctx->stream_frame = new SharedFrame(lua_cv::Frame(std::move(mat_copy)));
+                            }
+                            vb_sf->release();
+                        }
+                    }
+                }
                 result = runInference(ctx->frame->frame(), ctx->upstream_result);
             }
 
@@ -622,7 +646,19 @@ void ModelNode::inferLoop() {
                 upstream_camera_->report_proc_time(id_, elapsed_ms);
             }
 
+            // Check if any detections before result is moved.
+            bool has_detections = result.contains("items") &&
+                                  result["items"].is_array() &&
+                                  !result["items"].empty();
+
             nlohmann::json event_data = build_inference_event_data(std::move(result));
+
+            // Release pre-saved stream frame if no detections.
+            // Downstream CROPPED_ROI nodes have nothing to crop.
+            if (!has_detections && ctx->stream_frame) {
+                ctx->stream_frame->release();
+                ctx->stream_frame = nullptr;
+            }
 
             // Cache inference result for previewLoop to overlay on stream frames
             {
@@ -868,23 +904,13 @@ void ModelNode::forwardToDownstream(PipelineContext* ctx, const nlohmann::json& 
         }
     }
 
-    // For CROPPED_ROI downstream: convert VB stream frame to CPU mat upfront
-    // so VB blocks are released immediately, not held during inbox transit.
+    // For CROPPED_ROI downstream: use pre-saved CPU mat from inferLoop.
+    // The stream frame was captured before inference to minimize timing gap.
+    // If null, upstream had no detections — skip forwarding stream data.
     SharedFrame* cpu_stream = nullptr;
-    if (has_roi_downstream) {
-        SharedFrame* vb_sf = ctx->stream_frame
-            ? ctx->stream_frame
-            : (upstream_camera_ ? upstream_camera_->grab_latest_stream_frame() : nullptr);
-        if (vb_sf) {
-            cv::Mat mat_copy = vb_sf->frame().to_mat_copy();
-            if (!mat_copy.empty()) {
-                cpu_stream = new SharedFrame(lua_cv::Frame(std::move(mat_copy)));
-            }
-            // Release VB stream frame immediately after conversion.
-            if (vb_sf != ctx->stream_frame) {
-                vb_sf->release();
-            }
-        }
+    if (has_roi_downstream && ctx->stream_frame) {
+        cpu_stream = ctx->stream_frame;
+        cpu_stream->ref();
     }
 
     std::lock_guard<std::mutex> lock(subscribers_mutex_);
