@@ -6,7 +6,8 @@
 local Model = {}
 
 Model.config = {
-    min_face_size = 20,
+    min_face_size = 60,
+    max_yaw_ratio = 0.5,  -- skip side faces: |d_left - d_right| / max(d_left, d_right)
 }
 
 Model.preprocess_config = {
@@ -28,10 +29,29 @@ function Model.select_rois(upstream)
     print(string.format("[MobileFaceNet] select_rois: received %d boxes from upstream", #boxes))
     for _, box in ipairs(boxes) do
         if box.w >= Model.config.min_face_size and box.h >= Model.config.min_face_size then
+            -- Filter side faces: check eye-to-nose symmetry
+            local kps = box.keypoints
+            if kps and #kps >= 3 then
+                local dx_l = kps[1].x - kps[3].x
+                local dy_l = kps[1].y - kps[3].y
+                local dx_r = kps[2].x - kps[3].x
+                local dy_r = kps[2].y - kps[3].y
+                local d_left = math.sqrt(dx_l * dx_l + dy_l * dy_l)
+                local d_right = math.sqrt(dx_r * dx_r + dy_r * dy_r)
+                local d_max = math.max(d_left, d_right)
+                if d_max > 0 then
+                    local yaw_ratio = math.abs(d_left - d_right) / d_max
+                    if yaw_ratio > Model.config.max_yaw_ratio then
+                        print(string.format("[MobileFaceNet] skip side face: yaw_ratio=%.2f", yaw_ratio))
+                        goto continue
+                    end
+                end
+            end
             table.insert(rois, box)
         end
+        ::continue::
     end
-    print(string.format("[MobileFaceNet] select_rois: %d ROIs after min_size filter", #rois))
+    print(string.format("[MobileFaceNet] select_rois: %d ROIs after filter", #rois))
     return rois
 end
 
