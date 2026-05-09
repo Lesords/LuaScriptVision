@@ -616,6 +616,17 @@ RoiExecutionResult execute_roi_inference(const lua_cv::Frame& frame,
                 result.valid = false;
                 return result;
             }
+            // Save raw ROI crop BEFORE alignment for comparison
+            if (preprocess.save_crop) {
+                cv::Rect raw_rect(roi.roi.x, roi.roi.y, roi.roi.w, roi.roi.h);
+                raw_rect = raw_rect & cv::Rect(0, 0, src.cols, src.rows);
+                if (!raw_rect.empty()) {
+                    cv::Mat raw_crop = src(raw_rect).clone();
+                    cv::resize(raw_crop, raw_crop, cv::Size(target_w, target_h));
+                    static int raw_debug_idx = 0;
+                    cv::imwrite(preprocess.save_path + "/raw_crop_" + std::to_string(raw_debug_idx++) + ".jpg", raw_crop);
+                }
+            }
             mat = align_face(src, roi, target_w, target_h, preprocess.fill_value);
             if (mat.empty()) {
                 result.warning = ExecutionWarning{"Face alignment failed", "Failed to estimate affine transform"};
