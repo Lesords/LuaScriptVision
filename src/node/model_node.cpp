@@ -67,7 +67,7 @@ int ModelNode::parseConfig(const nlohmann::json& config) {
     } else if (config.contains("uri")) {
         config_.model_path = config.at("uri");
     } else {
-        config_.model_path = "/usr/share/supervisor/models/yolo11n_detection_cv181x_int8.cvimodel";
+        config_.model_path = MODEL_DIR "/yolo11n_detection_cv181x_int8.cvimodel";
     }
 
 #ifdef USE_CVI_TPU
@@ -79,12 +79,12 @@ int ModelNode::parseConfig(const nlohmann::json& config) {
 
     if (config.contains("script") && !config.at("script").get<std::string>().empty()) {
         config_.script_path = config.at("script");
-        // Auto-complete relative script names to /userdata/scripts/
         if (config_.script_path[0] != '/') {
-            config_.script_path = "/userdata/scripts/" + config_.script_path;
+            config_.script_path = LUA_SCRIPT_DIR "/" + config_.script_path;
         }
     } else {
-        config_.script_path = "/userdata/scripts/yolo11_tensor_detector.lua";
+        last_error_ = "Script path not configured: 'script' field is required";
+        return MA_ENOENT;
     }
 
     if (!file_exists(config_.script_path)) {

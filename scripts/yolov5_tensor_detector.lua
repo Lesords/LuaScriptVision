@@ -2,8 +2,8 @@
 -- YOLOv5格式: [1, 25200, 85] = [batch, num_boxes, 4_coords + 1_obj + 80_classes]
 local utils = lua_utils
 local nn = lua_nn
-local preprocess_lib = require("scripts.lib.preprocess")
-local coco_labels = require("scripts.lib.coco")
+local preprocess_lib = require("lib.preprocess")
+local coco_labels = require("lib.coco")
 
 local Model = {}
 

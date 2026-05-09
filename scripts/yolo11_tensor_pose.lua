@@ -2,7 +2,7 @@
 -- 展示如何用通用Tensor操作处理姿态估计
 local utils = lua_utils
 local nn = lua_nn
-local preprocess_lib = require("scripts.lib.preprocess")
+local preprocess_lib = require("lib.preprocess")
 
 local Model = {}
 

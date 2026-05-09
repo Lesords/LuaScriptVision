@@ -3,8 +3,8 @@
 -- Optimized: vectorized DFL decode using pure C++ tensor operations
 local utils = lua_utils
 local nn = lua_nn
-local preprocess_lib = require("scripts.lib.preprocess")
-local coco_labels = require("scripts.lib.coco")
+local preprocess_lib = require("lib.preprocess")
+local coco_labels = require("lib.coco")
 
 local Model = {}
 

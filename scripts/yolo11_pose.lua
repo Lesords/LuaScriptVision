@@ -1,6 +1,6 @@
 -- YOLO11 Pose Estimation Script
 -- local utils = require "lua_utils" -- lua_utils is registered globally
-local preprocess_lib = require("scripts.lib.preprocess")
+local preprocess_lib = require("lib.preprocess")
 
 local Model = {}
 

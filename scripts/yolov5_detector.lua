@@ -2,8 +2,8 @@
 -- local cv = require "lua_cv"
 -- local nn = require "lua_nn"
 -- local utils = require "lua_utils"
-local preprocess_lib = require("scripts.lib.preprocess")
-local coco_labels = require("scripts.lib.coco")
+local preprocess_lib = require("lib.preprocess")
+local coco_labels = require("lib.coco")
 
 local Model = {}
 

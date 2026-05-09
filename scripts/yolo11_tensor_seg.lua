@@ -2,8 +2,8 @@
 -- 展示如何用通用Tensor操作处理分割任务
 local utils = lua_utils
 local nn = lua_nn
-local preprocess_lib = require("scripts.lib.preprocess")
-local coco_labels = require("scripts.lib.coco")
+local preprocess_lib = require("lib.preprocess")
+local coco_labels = require("lib.coco")
 
 local Model = {}
 

@@ -2,7 +2,7 @@
 -- Supports SCRFD-500M-KPS model with 9 outputs:
 --   3 score (sigmoided), 3 bbox (distance-based), 3 keypoints (5 points × 2 coords)
 local utils = lua_utils
-local preprocess_lib = require("scripts.lib.preprocess")
+local preprocess_lib = require("lib.preprocess")
 
 local Model = {}
 

@@ -1,5 +1,13 @@
 #pragma once
 
+#ifndef LUA_SCRIPT_DIR
+#define LUA_SCRIPT_DIR "/usr/local/share/lua-scripts"
+#endif
+
+#ifndef MODEL_DIR
+#define MODEL_DIR "/usr/share/supervisor/models"
+#endif
+
 #include "data_node.h"
 #include "model_preprocess_utils.h"
 #include "model_roi_utils.h"
