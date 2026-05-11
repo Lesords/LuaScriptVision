@@ -6,7 +6,11 @@
 #   3. Build: cmake --build build -j$(nproc)
 
 # Check required environment variable
-if(NOT DEFINED ENV{SG200X_SDK_PATH})
+if(DEFINED ENV{SG200X_SDK_PATH})
+    set(SG200X_SDK_PATH $ENV{SG200X_SDK_PATH})
+elseif(DEFINED CACHE{SG200X_SDK_PATH})
+    set(CMAKE_TRY_COMPILE_PLATFORM_VARIABLES SG200X_SDK_PATH)
+else()
     message(FATAL_ERROR
         "SG200X_SDK_PATH environment variable not set.\n"
         "Please set it to the SDK path, for example:\n"
@@ -14,7 +18,6 @@ if(NOT DEFINED ENV{SG200X_SDK_PATH})
     )
 endif()
 
-set(SG200X_SDK_PATH $ENV{SG200X_SDK_PATH})
 message(STATUS "SG200X SDK Path: ${SG200X_SDK_PATH}")
 
 # =============================================================================
