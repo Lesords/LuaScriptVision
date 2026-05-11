@@ -33,6 +33,23 @@ set(CMAKE_SYSTEM_PROCESSOR riscv64)
 get_filename_component(RECAMERA_OS_ROOT "${SG200X_SDK_PATH}/../.." ABSOLUTE)
 set(TOOLCHAIN_ROOT "${RECAMERA_OS_ROOT}/host-tools/gcc/riscv64-linux-musl-x86_64")
 
+# Sysroot & search isolation for cross compilation
+if(NOT CMAKE_SYSROOT OR CMAKE_SYSROOT STREQUAL "")
+    set(CMAKE_SYSROOT
+        "${SG200X_SDK_PATH}/buildroot-2021.05/output/cvitek_CV181X_musl_riscv64/host/riscv64-buildroot-linux-musl/sysroot"
+    )
+endif()
+
+set(CMAKE_FIND_ROOT_PATH
+    "${CMAKE_SYSROOT}"
+)
+
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+
 # Set compilers
 set(CMAKE_C_COMPILER   "${TOOLCHAIN_ROOT}/bin/riscv64-unknown-linux-musl-gcc")
 set(CMAKE_CXX_COMPILER "${TOOLCHAIN_ROOT}/bin/riscv64-unknown-linux-musl-g++")
